@@ -20,5 +20,11 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install -e '.[pcbox]'
 .venv/bin/python -m pip install "$STAPIPY_WHEEL"
 
+if [[ "$(id -u)" -eq 0 ]]; then
+  scripts/fix_gige_network.sh
+elif [[ ! -f /etc/sysctl.d/99-sincro-robo-gige.conf ]]; then
+  echo "Rede GigE: execute uma vez 'sudo scripts/fix_gige_network.sh' (ARP por interface)." >&2
+fi
+
 echo "Instalação concluída. Execute scripts/preflight.py antes de iniciar a câmera."
 

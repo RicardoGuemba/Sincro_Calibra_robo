@@ -177,8 +177,17 @@ function renderCandidate(candidate) {
   if (!dialog.open) dialog.showModal();
 }
 
+function renderCameraPlaceholder(camera) {
+  const failing = camera?.status === "error";
+  dom("camera-empty-title").textContent = failing ? "Câmera sem imagem" : "Aguardando primeiro frame";
+  dom("camera-empty-detail").textContent = failing && camera.error
+    ? camera.error
+    : "A imagem aparecerá quando o serviço de câmera estiver pronto.";
+}
+
 function render(state) {
   setService("status-camera", state.hardware.camera);
+  renderCameraPlaceholder(state.hardware.camera);
   setService("status-model", state.hardware.model);
   setService("status-plc", state.hardware.plc);
   renderVision(state.vision);
@@ -256,6 +265,10 @@ async function initialize() {
 dom("camera-frame").addEventListener("load", () => {
   dom("camera-frame").classList.add("visible");
   dom("camera-empty").classList.add("hidden");
+});
+dom("camera-frame").addEventListener("error", () => {
+  dom("camera-frame").classList.remove("visible");
+  dom("camera-empty").classList.remove("hidden");
 });
 dom("new-session").addEventListener("click", () => dom("session-dialog").showModal());
 dom("activate-session").addEventListener("click", async () => {

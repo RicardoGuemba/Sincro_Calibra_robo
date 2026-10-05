@@ -7,9 +7,10 @@ from typing import Any
 
 import cv2
 
+from .. import netdiag
 from ..adapters.camera import StApiCamera, SyntheticCamera
 from ..adapters.plc import CipPoseReader, SyntheticPoseReader
-from ..adapters.segmenter import RFDetrSegmenter, SyntheticSegmenter, annotate_frame
+from ..adapters.segmenter import RFDetrSegmenter, SegmentationResult, SyntheticSegmenter, annotate_frame
 from ..domain import RobotPoseSnapshot, VisionObservation, utc_now
 from ..geometry import MoldPoseEstimator, VisionStabilityTracker, build_observation
 from ..storage import Storage
@@ -73,7 +74,11 @@ class ApplicationRuntime:
     def _make_camera(self) -> Any:
         settings = self.config["camera"]
         if settings["provider"] == "stapi":
-            return StApiCamera(settings["device_index"], settings["fetch_timeout_ms"])
+            return StApiCamera(
+                settings["device_index"],
+                settings["fetch_timeout_ms"],
+                settings.get("interface", ""),
+            )
         return SyntheticCamera(settings["width"], settings["height"])
 
     def _make_segmenter(self) -> Any:
@@ -134,16 +139,35 @@ class ApplicationRuntime:
             quality["max_jitter_y_px"],
             quality["max_jitter_angle_deg"],
         )
-        frame_period = 1.0 / max(0.5, float(self.config["camera"]["target_fps"]))
+        camera_settings = self.config["camera"]
+        frame_period = 1.0 / max(0.5, float(camera_settings["target_fps"]))
+        camera_interface = str(camera_settings.get("interface", "") or "")
+        reconnect_after = max(1, int(camera_settings.get("reconnect_after_failures", 5)))
+        failures = 0
+        rx_before: dict[str, int] = {}
+        network_hint: str | None = None
+        camera_failed = False
         try:
-            camera.open()
+            try:
+                camera.open()
+            except Exception:
+                camera_failed = True
+                raise
             with self.state._lock:
                 self.state.camera_status = "online"
                 self.state.camera_error = None
-            segmenter.load()
-            with self.state._lock:
-                self.state.model_status = "online"
-                self.state.model_error = None
+            # A missing/broken model must not take the camera preview down with it.
+            model_ready = False
+            try:
+                segmenter.load()
+                model_ready = True
+                with self.state._lock:
+                    self.state.model_status = "online"
+                    self.state.model_error = None
+            except Exception as error:
+                with self.state._lock:
+                    self.state.model_status = "error"
+                    self.state.model_error = f"{type(error).__name__}: {error}"
             while not self._stop.is_set():
                 started = time.monotonic()
                 try:
@@ -156,20 +180,41 @@ class ApplicationRuntime:
                         self.campaign.observe_frame(frame)
                     except Exception:
                         pass
+                    failures = 0
+                    network_hint = None
                     with self.state._lock:
                         self.state.camera_status = "online"
                         self.state.camera_error = None
                 except Exception as error:
                     stability.clear()
+                    failures += 1
+                    if failures == 1:
+                        rx_before = netdiag.rx_bytes()
+                    message = f"{type(error).__name__}: {error}"
+                    if failures >= reconnect_after and hasattr(camera, "reconnect"):
+                        network_hint = netdiag.stream_ingress_issue(
+                            camera_interface, rx_before, netdiag.rx_bytes()
+                        ) or netdiag.arp_flux_issue(camera_interface) or network_hint
+                        try:
+                            # Re-opening the stream channel makes the camera re-resolve the host MAC.
+                            camera.reconnect()
+                            message = f"{message} (reconectando após {failures} falhas)"
+                        except Exception as reconnect_error:
+                            message = f"{message}; reconexão falhou: {reconnect_error}"
+                        failures = 0
+                    if network_hint:
+                        message = f"{message} — {network_hint}"
                     with self.state._lock:
                         self.state.vision = None
+                        if failures != 1:
+                            self.state.frame_jpeg = None
                         self.state.camera_status = "error"
-                        self.state.camera_error = str(error)
+                        self.state.camera_error = message
                         self.state.updated_at = utc_now()
                     self._stop.wait(frame_period)
                     continue
                 try:
-                    result = segmenter.predict(frame)
+                    result = segmenter.predict(frame) if model_ready else SegmentationResult((), (), ())
                     observation = None
                     display_mask = None
                     if result.masks:
@@ -219,9 +264,10 @@ class ApplicationRuntime:
                         self.state.vision = observation
                         self.state.frame_jpeg = campaign_jpeg
                         self.state.camera_status = "online"
-                        self.state.model_status = "online"
                         self.state.camera_error = None
-                        self.state.model_error = None
+                        if model_ready:
+                            self.state.model_status = "online"
+                            self.state.model_error = None
                         self.state.updated_at = utc_now()
                 except Exception as error:
                     stability.clear()
@@ -235,12 +281,13 @@ class ApplicationRuntime:
                     self._stop.wait(remaining)
         except Exception as error:
             with self.state._lock:
-                if self.state.camera_status != "online":
+                if camera_failed:
                     self.state.camera_status = "error"
-                    self.state.camera_error = str(error)
+                    hint = netdiag.arp_flux_issue(camera_interface)
+                    self.state.camera_error = f"{type(error).__name__}: {error}" + (f" — {hint}" if hint else "")
                 else:
                     self.state.model_status = "error"
-                    self.state.model_error = str(error)
+                    self.state.model_error = f"{type(error).__name__}: {error}"
         finally:
             try:
                 camera.close()
@@ -249,6 +296,8 @@ class ApplicationRuntime:
             with self.state._lock:
                 if not self._stop.is_set():
                     self.state.camera_status = "error"
+                    if not self.state.camera_error:
+                        self.state.camera_error = "Loop de visão encerrado inesperadamente"
                 else:
                     self.state.camera_status = "offline"
                     self.state.model_status = "offline"

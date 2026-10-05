@@ -6,7 +6,9 @@
   "camera": {
     "provider": "stapi",
     "device_index": 0,
-    "fetch_timeout_ms": 400,
+    "interface": "enp3s0",
+    "fetch_timeout_ms": 1500,
+    "reconnect_after_failures": 5,
     "target_fps": 8.0
   },
   "model": {
@@ -21,11 +23,14 @@
   },
   "plc": {
     "provider": "cip",
-    "ip": "",
+    "ip": "192.168.250.1",
     "port": 44818,
     "connection_timeout_s": 10.0,
     "poll_interval_s": 0.2,
     "pose_tag": "RobFrom_Coord_CurrBase_Tool",
     "angle_unit": "degrees"
+  },
+  "calibration": {
+    "board_inner_corners": [7, 7]
   }
 }

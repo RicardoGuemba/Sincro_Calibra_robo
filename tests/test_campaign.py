@@ -176,6 +176,20 @@ def test_direction_and_plane_metrics_roundtrip() -> None:
     assert metrics["millimetres"]["max"] < 1e-3
 
 
+def test_repeated_intrinsic_pose_is_refused(campaign: CampaignController) -> None:
+    campaign.create("Repetida", 30.0)
+    _stabilize_focus(campaign)
+    campaign.set_checks(_hardware_checks(focus=True))
+    campaign.advance()
+    view = _projected_views(1)[0]
+    campaign.record_capture(view.tolist(), (960, 540))
+    with pytest.raises(ValueError, match="praticamente igual"):
+        campaign.record_capture((view + 0.3).tolist(), (960, 540))
+    with pytest.raises(ValueError, match="praticamente igual"):
+        campaign.record_capture(view[::-1].tolist(), (960, 540))
+    campaign.record_capture(view.tolist(), (960, 540), decision="rejected")
+
+
 def test_full_wizard_reaches_the_mold_affine(campaign: CampaignController) -> None:
     campaign.create("Campanha local", 30.0)
     _stabilize_focus(campaign)

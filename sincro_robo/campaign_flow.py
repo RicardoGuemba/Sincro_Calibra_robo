@@ -38,9 +38,9 @@ STAGE_GUIDE: dict[str, dict[str, str]] = {
     },
     "capture_intrinsic": {
         "title": "2. Capturar a intrínseca",
-        "what": "Mostre o tabuleiro rígido em várias posições. Aceite só imagens com os 54 cantos internos nítidos.",
+        "what": "Mostre o tabuleiro rígido em várias posições. Aceite só imagens com todos os cantos internos nítidos.",
         "why": "A lente precisa ser excitada no centro, nos cantos, nas bordas, com inclinação e com distância diferente.",
-        "gate": f"Pelo menos {MIN_ACCEPTED} imagens aceitas, 54 cantos em cada uma, e as nove regiões do campo cobertas.",
+        "gate": f"Pelo menos {MIN_ACCEPTED} imagens aceitas, todos os cantos internos em cada uma, e as nove regiões do campo cobertas.",
     },
     "review_reprojection": {
         "title": "3. Revisar a reprojeção",
@@ -56,7 +56,7 @@ STAGE_GUIDE: dict[str, dict[str, str]] = {
     },
     "teach_frame": {
         "title": "5. Ensinar origem e eixos",
-        "what": "Com o tabuleiro parado, encoste o TCP na origem vermelha, num ponto ao longo dos 9 cantos (+X) e num ponto ao longo dos 6 cantos (+Y). Grave cada pose.",
+        "what": "Com o tabuleiro parado, encoste o TCP na origem vermelha, num ponto ao longo da primeira fileira de cantos (+X) e num ponto ao longo da primeira coluna (+Y). Grave cada pose.",
         "why": "solvePnP enxerga o tabuleiro na câmera. Sem estes três toques, essa pose não está no referencial do robô.",
         "gate": "Três poses gravadas e eixos que não sejam quase a mesma reta.",
     },
@@ -132,8 +132,10 @@ def gate_for(snapshot: dict[str, Any]) -> dict[str, Any]:
         accepted = _accepted(captures, "capture_intrinsic")
         if len(accepted) < MIN_ACCEPTED:
             return _blocked(f"Faltam {MIN_ACCEPTED - len(accepted)} imagens aceitas.")
-        if any(int(item.get("corner_count") or 0) != PATTERN[0] * PATTERN[1] for item in accepted):
-            return _blocked("Toda imagem aceita precisa ter 54 cantos.")
+        pattern = snapshot.get("pattern") or PATTERN
+        expected = int(pattern[0]) * int(pattern[1])
+        if any(int(item.get("corner_count") or 0) != expected for item in accepted):
+            return _blocked(f"Toda imagem aceita precisa ter {expected} cantos.")
         missing = missing_cells(_filled_cells(accepted))
         if missing:
             return _blocked(f"Ainda falta cobertura: {missing[0]}.")

@@ -86,10 +86,12 @@ class StApiCamera:
         "BayerBG": cv2.COLOR_BayerBGGR2BGR,
     }
 
-    def __init__(self, device_index: int = 0, fetch_timeout_ms: int = 400) -> None:
+    def __init__(self, device_index: int = 0, fetch_timeout_ms: int = 400, interface: str = "") -> None:
         self.device_index = int(device_index)
         self.fetch_timeout_ms = int(fetch_timeout_ms)
+        self.interface = str(interface or "").strip()
         self._st: Any = None
+        self._system: Any = None
         self._device: Any = None
         self._datastream: Any = None
         self._initialized = False
@@ -109,18 +111,66 @@ class StApiCamera:
             self._st = st
             st.initialize()
             self._initialized = True
-            system = st.create_system()
-            if self.device_index <= 0:
-                self._device = system.create_first_device()
-            else:
-                interface = system.create_first_interface()
-                self._device = interface.create_device_by_index(self.device_index)
-            self._datastream = self._device.create_datastream()
-            self._datastream.start_acquisition()
-            self._device.acquisition_start()
+            self._system = st.create_system()
+            self._connect()
         except Exception:
             self.close()
             raise
+
+    def reconnect(self) -> None:
+        """Recreate device and stream without re-initializing StApi (not re-entrant per process)."""
+        self._assert_owner()
+        if not self._initialized or self._system is None:
+            raise RuntimeError("Câmera StApi não está aberta")
+        self._disconnect()
+        self._connect()
+
+    def _connect(self) -> None:
+        system = self._system
+        if self.interface:
+            # With several NICs on the same L2 segment the camera is discovered on all of
+            # them; streaming only works through the NIC on the camera's subnet.
+            self._device = self._open_on_interface(system)
+        elif self.device_index <= 0:
+            self._device = system.create_first_device()
+        else:
+            interface = system.create_first_interface()
+            self._device = interface.create_device_by_index(self.device_index)
+        self._datastream = self._device.create_datastream()
+        self._datastream.start_acquisition()
+        self._device.acquisition_start()
+
+    def _disconnect(self) -> None:
+        if self._device is not None:
+            try:
+                self._device.acquisition_stop()
+            except Exception:
+                pass
+        if self._datastream is not None:
+            try:
+                self._datastream.stop_acquisition()
+            except Exception:
+                pass
+        self._datastream = None
+        self._device = None
+
+    def _open_on_interface(self, system: Any) -> Any:
+        available: list[str] = []
+        for index in range(system.interface_count):
+            interface = system.get_interface(index)
+            name = str(interface.info.display_name)
+            available.append(name)
+            if name != self.interface:
+                continue
+            interface.update_device_list()
+            if interface.device_count <= max(0, self.device_index):
+                raise RuntimeError(
+                    f"Nenhuma câmera Sentech no índice {self.device_index} da interface {name}"
+                )
+            return interface.create_device_by_index(max(0, self.device_index))
+        raise RuntimeError(
+            f"Interface StApi '{self.interface}' não encontrada; disponíveis: {', '.join(available)}"
+        )
 
     def _bayer_code(self, pixel_format: Any, info: Any) -> int:
         color_filter = None
@@ -192,18 +242,8 @@ class StApiCamera:
     def close(self) -> None:
         self._assert_owner()
         try:
-            if self._device is not None:
-                try:
-                    self._device.acquisition_stop()
-                except Exception:
-                    pass
-            if self._datastream is not None:
-                try:
-                    self._datastream.stop_acquisition()
-                except Exception:
-                    pass
-            self._device = None
-            self._datastream = None
+            self._disconnect()
+            self._system = None
             if self._initialized and self._st is not None:
                 self._st.terminate()
         finally:
