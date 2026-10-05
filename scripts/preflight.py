@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from sincro_robo import netdiag
 from sincro_robo.config import load_config
 
 
@@ -74,6 +75,15 @@ def main() -> int:
         "sha256": file_sha256(checkpoint) if checkpoint.is_file() and not pointer else None,
         "lfs_pointer": pointer,
     }
+    if config["camera"]["provider"] == "stapi":
+        camera_interface = str(config["camera"].get("interface", "") or "")
+        arp_issue = netdiag.arp_flux_issue(camera_interface)
+        results["camera_interface"] = {
+            "value": camera_interface or "não definida",
+            "ok": bool(camera_interface) and camera_interface in netdiag.active_interfaces(),
+        }
+        results["gige_arp"] = {"value": arp_issue or "ARP restrito por interface", "ok": arp_issue is None}
+
     plc_ip = os.environ.get("SINCRO_PLC_IP") or config["plc"].get("ip")
     results["plc_ip"] = {"value": plc_ip or "não definido", "ok": bool(plc_ip)}
     if args.check_network and plc_ip:

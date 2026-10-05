@@ -21,7 +21,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "camera": {
         "provider": "synthetic",
         "device_index": 0,
+        "interface": "",
         "fetch_timeout_ms": 400,
+        "reconnect_after_failures": 5,
         "target_fps": 8.0,
         "width": 960,
         "height": 540,
@@ -76,6 +78,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "duplicate_angle_deg": 3.0,
         "plan_z_tolerance_mm": 20.0,
         "target_region_radius_norm": 0.24,
+        "board_inner_corners": [9, 6],
     },
 }
 

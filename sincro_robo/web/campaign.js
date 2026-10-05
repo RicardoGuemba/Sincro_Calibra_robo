@@ -210,6 +210,11 @@ function addButton(parent, label, onClick, secondary = false) {
 }
 
 document.getElementById("new-campaign").addEventListener("click", () => {
+  const corners = app.config && app.config.board_inner_corners;
+  if (corners && corners.length === 2) {
+    document.getElementById("campaign-cols").value = corners[0];
+    document.getElementById("campaign-rows").value = corners[1];
+  }
   document.getElementById("campaign-dialog").showModal();
 });
 
@@ -217,8 +222,12 @@ document.getElementById("campaign-form").addEventListener("submit", async (event
   event.preventDefault();
   const name = document.getElementById("campaign-name").value.trim();
   const square = Number(document.getElementById("campaign-square").value);
+  const pattern = [
+    Number(document.getElementById("campaign-cols").value),
+    Number(document.getElementById("campaign-rows").value),
+  ];
   try {
-    await api("/api/campaigns", { method: "POST", body: JSON.stringify({ name, square_size_mm: square }) });
+    await api("/api/campaigns", { method: "POST", body: JSON.stringify({ name, square_size_mm: square, pattern }) });
     document.getElementById("campaign-dialog").close();
     campaignSignature = "";
     await refreshState();

@@ -14,6 +14,7 @@ from ..calibration import fit_plan_calibration
 from ..campaign_flow import BOARD_STAGES, STAGE_GUIDE, STAGES, coverage_view, gate_for, next_stage
 from ..domain import utc_now
 from ..optics import (
+    MIN_POSE_CHANGE_RATIO,
     PATTERN,
     VALIDATION_PLANES_MM,
     board_frame,
@@ -63,16 +64,23 @@ class CampaignController:
         with self._lock:
             return self._pose_override
 
-    def create(self, name: str, square_size_mm: float) -> dict[str, Any]:
+    def create(
+        self, name: str, square_size_mm: float, pattern: list[int] | tuple[int, int] | None = None
+    ) -> dict[str, Any]:
         cleaned = name.strip()
         if not cleaned or len(cleaned) > 120:
             raise ValueError("Dê um nome de 1 a 120 caracteres para a campanha")
         if float(square_size_mm) <= 0:
             raise ValueError("O lado do quadrado precisa ser maior que zero")
+        if pattern is None:
+            pattern = self.config.get("calibration", {}).get("board_inner_corners") or PATTERN
+        corners = [int(value) for value in pattern]
+        if len(corners) != 2 or min(corners) < 3:
+            raise ValueError("Informe colunas e linhas de cantos internos, cada uma com pelo menos 3")
         state = {
             "stage": "fix_hardware",
             "square_size_mm": float(square_size_mm),
-            "pattern": list(PATTERN),
+            "pattern": corners,
             "checks": {
                 "camera_fixed": False,
                 "lens_focus_locked": False,
@@ -536,6 +544,29 @@ class CampaignController:
             "focus": self.focus_view(),
         }
 
+    def _reject_repeated_pose(
+        self, campaign: dict[str, Any], corners: list[list[float]], size: list[int]
+    ) -> None:
+        # Repeated views add nothing to K and only inflate the accepted count.
+        cols, rows = (int(value) for value in campaign["state"]["pattern"])
+        points = np.asarray(corners, dtype=np.float64).reshape(rows, cols, 2)
+        # OpenCV may return the same view starting from another symmetric corner.
+        orderings = [points, points[::-1, ::-1]]
+        if cols == rows:
+            orderings += [np.rot90(points, 1), np.rot90(points, 3)]
+        limit = MIN_POSE_CHANGE_RATIO * float(np.hypot(size[0], size[1]))
+        for item in self._accepted(campaign, "capture_intrinsic"):
+            previous = np.asarray(item.get("corners") or [], dtype=np.float64)
+            if previous.size != points.size:
+                continue
+            previous = previous.reshape(rows, cols, 2)
+            shift = min(float(np.linalg.norm(view - previous, axis=2).mean()) for view in orderings)
+            if shift < limit:
+                raise ValueError(
+                    "Esta pose é praticamente igual a uma imagem já aceita. "
+                    "Mova ou incline o tabuleiro antes de aceitar outra."
+                )
+
     def _store_capture(
         self,
         campaign: dict[str, Any],
@@ -556,6 +587,8 @@ class CampaignController:
         if decision == "accepted":
             if known and list(known) != size:
                 raise ValueError("A resolução mudou. O perfil só vale para o raster da primeira captura.")
+            if campaign["stage"] == "capture_intrinsic":
+                self._reject_repeated_pose(campaign, corners, size)
             campaign["state"]["image_size_px"] = size
         if campaign["stage"] == "solve_extrinsic" and decision == "accepted":
             for item in self._accepted(campaign, "solve_extrinsic"):
@@ -752,6 +785,7 @@ class CampaignController:
             "stage": campaign["stage"],
             "checks": campaign["state"].get("checks") or {},
             "square_size_mm": campaign["state"].get("square_size_mm"),
+            "pattern": campaign["state"].get("pattern"),
             "captures": campaign["captures"],
             "intrinsic": campaign["state"].get("intrinsic"),
             "reprojection_reviewed": campaign["state"].get("reprojection_reviewed"),

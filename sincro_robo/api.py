@@ -26,6 +26,7 @@ class Decision(BaseModel):
 class CampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     square_size_mm: float = Field(gt=0)
+    pattern: list[int] | None = Field(default=None, min_length=2, max_length=2)
 
 
 class CampaignChecks(BaseModel):
@@ -123,6 +124,7 @@ def create_app(config: dict[str, Any]) -> FastAPI:
             "xy_tolerance_mm": config["calibration"]["xy_tolerance_mm"],
             "angular_tolerance_deg": config["calibration"]["angular_tolerance_deg"],
             "pick_offset_local_mm": config["calibration"]["pick_offset_local_mm"],
+            "board_inner_corners": config["calibration"]["board_inner_corners"],
             "model_threshold": config["model"]["threshold"],
             "mode": {
                 "camera": config["camera"]["provider"],
@@ -172,7 +174,7 @@ def create_app(config: dict[str, Any]) -> FastAPI:
 
     @app.post("/api/campaigns", status_code=201)
     def create_campaign(request: CampaignCreate) -> dict[str, Any]:
-        view = runtime.campaign.create(request.name, request.square_size_mm)
+        view = runtime.campaign.create(request.name, request.square_size_mm, request.pattern)
         assert view is not None
         return view
 

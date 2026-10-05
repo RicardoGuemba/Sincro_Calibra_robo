@@ -76,8 +76,8 @@
           <img id="camera-frame" alt="Imagem da câmera com máscara, centroide e eixo principal">
           <div class="camera-empty" id="camera-empty">
             <div class="scan-icon"><span></span></div>
-            <strong>Aguardando primeiro frame</strong>
-            <small>A imagem aparecerá quando o serviço de câmera estiver pronto.</small>
+            <strong id="camera-empty-title">Aguardando primeiro frame</strong>
+            <small id="camera-empty-detail">A imagem aparecerá quando o serviço de câmera estiver pronto.</small>
           </div>
           <div class="frame-corners" aria-hidden="true"></div>
           <div class="frame-meta">
@@ -210,7 +210,8 @@
     <form method="dialog" id="campaign-form">
       <div class="modal-heading"><div><span class="eyebrow">Tabuleiro medido</span><h2>Nova campanha</h2></div><button value="cancel" class="close-button" aria-label="Fechar">×</button></div>
       <label>Nome<input id="campaign-name" maxlength="120" placeholder="Ex.: Curitiba · câmera fixa" required></label>
-      <label>Lado do quadrado, em milímetros<input id="campaign-square" type="number" min="0.1" step="0.01" value="30" required><small>Meça com paquímetro. 10×7 quadrados dão 9×6 cantos internos.</small></label>
+      <label>Lado do quadrado, em milímetros<input id="campaign-square" type="number" min="0.1" step="0.01" value="30" required><small>Meça com paquímetro.</small></label>
+      <label>Cantos internos (colunas × linhas)<span class="pattern-inputs"><input id="campaign-cols" type="number" min="3" step="1" value="9" required> × <input id="campaign-rows" type="number" min="3" step="1" value="6" required></span><small>Conte cruzamentos, não quadrados: 8×8 quadrados dão 7×7 cantos; 10×7 dão 9×6.</small></label>
       <div class="modal-actions"><button value="cancel" class="button button-secondary">Cancelar</button><button type="submit" value="default" class="button button-primary">Começar pela etapa 1</button></div>
     </form>
   </dialog>
