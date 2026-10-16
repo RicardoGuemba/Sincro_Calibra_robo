@@ -344,9 +344,53 @@ def test_full_wizard_reaches_the_mold_affine(campaign: CampaignController) -> No
     assert view is not None
     assert view["stage"] == "analyze_residuals"
     assert view["diagnosis"]["findings"]
+    assert view["summary"]["reprojection_rms_px"] is not None
+    assert view["summary"]["accepted_images"] >= 1
+    assert view["summary"]["affine_planes"]
     detail = capture.session_detail(session_id)
     assert detail["plans"][0]["evaluation"]["model"]["input_space"] == "undistorted_px_K_rect"
     assert detail["plans"][0]["evaluation"]["model"]["profile_sha256"] == view["profile_sha256"]
+
+
+def test_residual_stage_detects_the_board_instead_of_the_mold(campaign: CampaignController) -> None:
+    campaign.create("Resíduos", 30.0)
+    stored = campaign.storage.get_campaign(campaign.active_id)
+    assert stored is not None
+    campaign.storage.save_campaign_state(stored["id"], "analyze_residuals", stored["state"])
+    frame = render_checkerboard_frame(960, 540, 1)
+    found = campaign.observe_frame(frame)
+    assert campaign.camera_scene() == "board"
+    assert found is not None
+    assert found["found"] is True
+    view = campaign.view()
+    assert view is not None
+    assert view["detection"]["found"] is True
+    summary = view["summary"]
+    assert summary["tcp_local_mm"] == [0.0, 55.0]
+    assert summary["accepted_images"] == 0
+    assert view["gate"]["passed"] is True
+
+
+def test_finish_closes_the_campaign_and_returns_to_the_mold(campaign: CampaignController) -> None:
+    created = campaign.create("Fechar", 30.0)
+    assert created is not None
+    with pytest.raises(ValueError, match="etapa atual"):
+        campaign.finish()
+    stored = campaign.storage.get_campaign(created["id"])
+    assert stored is not None
+    campaign.storage.save_campaign_state(stored["id"], "analyze_residuals", stored["state"])
+    view = campaign.view()
+    assert view is not None
+    assert view["summary"]["square_size_mm"] == 30.0
+    closed = campaign.finish()
+    assert closed == {"id": created["id"], "closed": True, "status": "closed"}
+    assert campaign.view() is None
+    assert campaign.camera_scene() == "mold"
+    listed = campaign.summaries()
+    assert listed[0]["status"] == "closed"
+    resumed = campaign.resume(created["id"])
+    assert resumed["stage"] == "analyze_residuals"
+    assert campaign.storage.get_campaign(created["id"])["status"] == "active"
 
 
 def test_step_nine_can_use_an_existing_mold_session(campaign: CampaignController) -> None:

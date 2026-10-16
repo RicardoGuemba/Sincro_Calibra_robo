@@ -163,6 +163,8 @@ class CampaignController:
             except KeyError:
                 pass
         self.storage.audit(campaign["id"], "campaign_resumed", {"stage": campaign["stage"]})
+        if campaign.get("status") != "active":
+            self.storage.save_campaign_state(campaign["id"], campaign["stage"], campaign["state"], status="active")
         view = self.view()
         assert view is not None
         return view
@@ -285,6 +287,24 @@ class CampaignController:
         self._save(campaign)
         self.storage.audit(campaign["id"], "campaign_retreated", {"stage": previous})
         return self.view()
+
+    def finish(self) -> dict[str, Any]:
+        campaign = self._require()
+        self._require_stage(campaign, "analyze_residuals")
+        self.storage.save_campaign_state(
+            campaign["id"], campaign["stage"], campaign["state"], status="closed"
+        )
+        with self._lock:
+            self.active_id = None
+            self.live_detection = None
+            self._detected_frame_id = None
+            self._held_jpeg = None
+            self._last_detected_jpeg = None
+            self._scene = "mold"
+            self._pose_override = None
+        self._reset_focus_tracker()
+        self.storage.audit(campaign["id"], "campaign_finished", {"stage": campaign["stage"]})
+        return {"id": campaign["id"], "closed": True, "status": "closed"}
 
     def observe_frame(self, frame_bgr: np.ndarray) -> dict[str, Any] | None:
         self._detection_ready = False
@@ -694,6 +714,7 @@ class CampaignController:
             "affine_session_name": self._affine_session_name(campaign),
             "profile_sha256": campaign["state"].get("profile_sha256"),
             "diagnosis": self._diagnosis(campaign) if stage == "analyze_residuals" else None,
+            "summary": self._summary(campaign) if stage == "analyze_residuals" else None,
             "extrinsic_ready": bool(campaign["state"].get("extrinsic")),
             "image_size_px": campaign["state"].get("image_size_px"),
             "focus": self.focus_view(),
@@ -836,13 +857,13 @@ class CampaignController:
     def _publish_simulation(self, campaign: dict[str, Any]) -> None:
         stage = campaign["stage"]
         scene = "mold"
-        # teach_frame e confirm_direction ainda olham o tabuleiro: a origem
-        # vermelha precisa continuar visível. A máscara verde do molde só entra depois.
+        # O molde, visto pelo RF-DETR, só entra na afim. A análise dos resíduos
+        # ainda mostra o tabuleiro; senão o xadrez é segmentado como embalagem.
         if stage == "fix_hardware":
             scene = "focus"
         elif stage == "confirm_undistort":
             scene = "undistort"
-        elif stage in BOARD_STAGES or stage in {"teach_frame", "confirm_direction"}:
+        elif stage in BOARD_STAGES or stage in {"teach_frame", "confirm_direction", "analyze_residuals"}:
             scene = "board"
         override = self._simulation_pose(campaign)
         with self._lock:
@@ -906,6 +927,52 @@ class CampaignController:
             diagnosis["findings"] = [*diagnosis["findings"], "RANSAC registrado. Os pontos originais permanecem na trilha."]
             diagnosis["ransac_available"] = False
         return diagnosis
+
+    def _summary(self, campaign: dict[str, Any]) -> dict[str, Any]:
+        intrinsic = campaign["state"].get("intrinsic") or {}
+        direction = campaign["state"].get("direction_check") or {}
+        accepted = [
+            item for item in campaign["captures"]
+            if item["decision"] == "accepted" and item["stage"] == "capture_intrinsic"
+        ]
+        affine_planes: list[dict[str, Any]] = []
+        session_id = campaign["state"].get("affine_session_id")
+        if session_id:
+            try:
+                detail = self.capture.session_detail(session_id)
+            except KeyError:
+                detail = None
+            if detail:
+                for plan in detail["plans"]:
+                    evaluation = plan["evaluation"]
+                    metrics = evaluation.get("metrics") or {}
+                    xy = metrics.get("xy_mm") or {}
+                    angle = metrics.get("angle_deg") or {}
+                    affine_planes.append(
+                        {
+                            "z": float(plan["z"]),
+                            "points": int(plan["count"]),
+                            "ready": bool(evaluation.get("ready")),
+                            "rms_mm": xy.get("rms"),
+                            "max_mm": xy.get("max"),
+                            "angle_rms_deg": angle.get("rms"),
+                            "passed": bool(metrics.get("passed")),
+                        }
+                    )
+        return {
+            "square_size_mm": campaign["state"].get("square_size_mm"),
+            "pattern": campaign["state"].get("pattern"),
+            "accepted_images": len(accepted),
+            "reprojection_rms_px": intrinsic.get("rms_px"),
+            "image_size_px": campaign["state"].get("image_size_px"),
+            "direction_correct_mm": direction.get("error_correct_mm"),
+            "direction_inverted_mm": direction.get("error_inverted_mm"),
+            "validation": self._validation_summary(campaign),
+            "affine_planes": affine_planes,
+            "tcp_local_mm": list(self.config["calibration"]["pick_offset_local_mm"]),
+            "affine_session_name": self._affine_session_name(campaign),
+            "profile_sha256": campaign["state"].get("profile_sha256"),
+        }
 
     @staticmethod
     def _pair_residual(evaluation: dict[str, Any], pair_id: str) -> float | None:

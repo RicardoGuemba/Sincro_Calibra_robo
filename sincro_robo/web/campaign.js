@@ -41,7 +41,8 @@ async function resumeCampaign(campaignId) {
 function campaignLabel(item) {
   const when = campaignWhen(item.created_at);
   const detail = when ? `${item.stage_title} · ${when}` : item.stage_title;
-  return `${item.name} — ${detail}`;
+  const closed = item.status === "closed" ? " · fechada" : "";
+  return `${item.name} — ${detail}${closed}`;
 }
 
 function syncCampaignButtons() {
@@ -57,7 +58,7 @@ function paintCampaignList(campaigns, activeId) {
   const select = document.getElementById("campaign-select");
   if (!select) return;
   const items = Array.isArray(campaigns) ? campaigns : [];
-  const signature = `${activeId || ""}|${items.map((item) => `${item.id}:${item.stage}:${item.name}`).join("|")}`;
+  const signature = `${activeId || ""}|${items.map((item) => `${item.id}:${item.stage}:${item.status}:${item.name}`).join("|")}`;
   if (select.dataset.signature === signature) return;
   const previousActive = select.dataset.active || "";
   const keepSelection = previousActive === (activeId || "") && items.some((item) => item.id === select.value);
@@ -79,6 +80,46 @@ function paintCampaignList(campaigns, activeId) {
   syncCampaignButtons();
 }
 
+function campaignLiveText(campaign) {
+  if (campaign.stage === "analyze_residuals") return "";
+  if (campaign.frame_frozen) {
+    return `Imagem congelada${campaign.detection?.found ? ` · ${campaign.detection.count} cantos` : ""}`;
+  }
+  return campaign.detection?.found
+    ? `Tabuleiro visto · ${campaign.detection.count} cantos`
+    : "Tabuleiro não detectado neste frame";
+}
+
+function summaryNumber(value, digits) {
+  return Number.isFinite(Number(value)) ? Number(value).toFixed(digits) : "—";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[char]));
+}
+
+function campaignSummary(campaign) {
+  const summary = campaign.summary;
+  if (!summary) return "";
+  const pattern = Array.isArray(summary.pattern) ? summary.pattern : ["—", "—"];
+  const tcp = Array.isArray(summary.tcp_local_mm) ? summary.tcp_local_mm.map((value) => summaryNumber(value, 0)).join(" · ") : "—";
+  const validation = (summary.validation || []).map((item) => `Z ${summaryNumber(item.z, 0)} · RMSE ${summaryNumber(item.rmse, 1)} mm · máx ${summaryNumber(item.max, 1)} mm`).join("<br>") || "Sem imagem de validação";
+  const affine = (summary.affine_planes || []).map((item) => item.ready
+    ? `Z ${summaryNumber(item.z, 0)} · RMS ${summaryNumber(item.rms_mm, 1)} mm · máx ${summaryNumber(item.max_mm, 1)} mm · ${item.points} pontos`
+    : `Z ${summaryNumber(item.z, 0)} · sem modelo`).join("<br>") || "Sem sessão de molde";
+  const session = summary.affine_session_name ? escapeHtml(summary.affine_session_name) : "Sem sessão ligada";
+  return `<div class="campaign-summary">
+    <div><span>Reprojeção da lente</span><strong>${summaryNumber(summary.reprojection_rms_px, 3)} px</strong><small>${summary.accepted_images} imagens aceitas</small></div>
+    <div><span>Sentido tabuleiro → câmera</span><strong>${summaryNumber(summary.direction_correct_mm, 1)} mm</strong><small>sentido invertido ${summaryNumber(summary.direction_inverted_mm, 1)} mm</small></div>
+    <div><span>Quadrado e padrão</span><strong>${summaryNumber(summary.square_size_mm, 1)} mm</strong><small>${pattern[0]} × ${pattern[1]} cantos internos</small></div>
+    <div><span>Validação dos planos</span><strong>${validation}</strong></div>
+    <div><span>Afim do molde</span><strong>${affine}</strong><small>${session}</small></div>
+    <div><span>TCP no referencial da ferramenta</span><strong>${tcp} mm</strong><small>X · Y</small></div>
+  </div>`;
+}
+
 function renderCampaign(campaign) {
   paintCampaignList(app.state?.campaigns, campaign?.id);
   const body = document.getElementById("campaign-body");
@@ -89,12 +130,11 @@ function renderCampaign(campaign) {
     return;
   }
   const live = document.getElementById("campaign-live");
-  const liveText = campaign.frame_frozen
-    ? `Imagem congelada${campaign.detection?.found ? ` · ${campaign.detection.count} cantos` : ""}`
-    : campaign.detection?.found
-      ? `Tabuleiro visto · ${campaign.detection.count} cantos`
-      : "Tabuleiro não detectado neste frame";
-  if (live) live.textContent = liveText;
+  const liveText = campaignLiveText(campaign);
+  if (live) {
+    live.hidden = campaign.stage === "analyze_residuals";
+    live.textContent = liveText;
+  }
   paintFocus(campaign);
   const signature = JSON.stringify({
     stage: campaign.stage,
@@ -112,6 +152,7 @@ function renderCampaign(campaign) {
     validation: campaign.validation,
     validationPlane: campaign.validation_plan_z,
     diagnosis: campaign.diagnosis,
+    summary: campaign.summary,
     affine: campaign.affine_session_id,
     sessions: (app.sessions || []).map((session) => session.id).join(","),
     sha: campaign.profile_sha256,
@@ -127,11 +168,12 @@ function renderCampaign(campaign) {
         <p><strong>O que fazer.</strong> ${campaign.copy.what}</p>
         <p><strong>Por quê.</strong> ${campaign.copy.why}</p>
       </div>
-      <div class="${gateClass}"><strong>Para avançar.</strong> ${campaign.gate.reason}</div>
+      <div class="${gateClass}"><strong>${campaign.stage === "analyze_residuals" ? "Para concluir." : "Para avançar."}</strong> ${campaign.gate.reason}</div>
     </div>
+    ${campaign.stage === "analyze_residuals" ? campaignSummary(campaign) : ""}
     <div class="campaign-actions" id="campaign-actions"></div>
-    <p class="campaign-live" id="campaign-live">${liveText}</p>
-    <p class="focus-meter" id="focus-meter"></p>
+    <p class="campaign-live" id="campaign-live" ${campaign.stage === "analyze_residuals" ? "hidden" : ""}>${liveText}</p>
+    <p class="focus-meter" id="focus-meter" ${campaign.stage === "analyze_residuals" ? "hidden" : ""}></p>
   `;
   paintFocus(campaign);
   const actions = document.getElementById("campaign-actions");
@@ -290,17 +332,25 @@ function renderCampaign(campaign) {
       actions.appendChild(hash);
     }
   }
-  if (stage === "analyze_residuals" && campaign.diagnosis) {
-    const list = document.createElement("ul");
-    list.className = "campaign-list";
-    campaign.diagnosis.findings.forEach((finding) => {
-      const item = document.createElement("li");
-      item.textContent = finding;
-      list.appendChild(item);
+  if (stage === "analyze_residuals") {
+    addButton(actions, "Finalizar campanha", () => {
+      if (!window.confirm("Finalizar a campanha? O perfil permanece gravado e a câmera volta a procurar o molde.")) return;
+      campaignPost("/api/campaigns/active/finish").then((ok) => {
+        if (ok) toast("Campanha finalizada. A câmera voltou a procurar o molde.");
+      });
     });
-    actions.appendChild(list);
-    if (campaign.diagnosis.ransac_available) {
-      addButton(actions, "Aplicar RANSAC nos outliers", () => campaignPost("/api/campaigns/active/ransac"));
+    if (campaign.diagnosis) {
+      const list = document.createElement("ul");
+      list.className = "campaign-list";
+      campaign.diagnosis.findings.forEach((finding) => {
+        const item = document.createElement("li");
+        item.textContent = finding;
+        list.appendChild(item);
+      });
+      actions.appendChild(list);
+      if (campaign.diagnosis.ransac_available) {
+        addButton(actions, "Aplicar RANSAC nos outliers", () => campaignPost("/api/campaigns/active/ransac"));
+      }
     }
   }
   if (campaign.stage_index > 0) {
@@ -344,6 +394,12 @@ function chooseValidationPlane(plane) {
 function paintFocus(campaign) {
   const node = document.getElementById("focus-meter");
   if (!node || !campaign?.focus) return;
+  if (campaign.stage === "analyze_residuals") {
+    node.hidden = true;
+    node.textContent = "";
+    return;
+  }
+  node.hidden = false;
   const focus = campaign.focus;
   if (focus.current === null || focus.current === undefined) {
     node.textContent = focus.status;

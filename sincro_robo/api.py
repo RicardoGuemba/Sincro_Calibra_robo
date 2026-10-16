@@ -298,6 +298,10 @@ def create_app(config: dict[str, Any]) -> FastAPI:
     def campaign_ransac() -> dict[str, Any]:
         return _campaign(runtime.campaign.apply_ransac())
 
+    @app.post("/api/campaigns/active/finish")
+    def campaign_finish() -> dict[str, Any]:
+        return runtime.campaign.finish()
+
     @app.post("/api/sessions/{session_id}/export")
     def export(session_id: str) -> dict[str, Any]:
         try:

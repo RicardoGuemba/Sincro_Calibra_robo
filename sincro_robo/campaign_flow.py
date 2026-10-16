@@ -86,9 +86,9 @@ STAGE_GUIDE: dict[str, dict[str, str]] = {
     },
     "analyze_residuals": {
         "title": "10. Analisar os resíduos",
-        "what": "Leia o padrão do erro: centro, borda, offset constante ou mudança com Z. O RANSAC só aparece se poucos pontos estiverem ruins.",
+        "what": "Leia o resumo: reprojeção da lente, erro do sentido, validação dos planos e RMS da afim. Finalize a campanha para a câmera voltar a procurar o molde.",
         "why": "O guia separa lente, pose da câmera, TCP e coleta. Cada padrão pede uma ação diferente.",
-        "gate": "Esta é a última etapa. O perfil óptico já está fechado.",
+        "gate": "Confira os números e finalize a campanha para voltar à busca do molde.",
     },
 }
 
@@ -206,7 +206,7 @@ def gate_for(snapshot: dict[str, Any]) -> dict[str, Any]:
             return _blocked("Grave pontos do molde até um plano ter modelo afim.")
         return _open("A afim residual já tem modelo.")
     if stage == "analyze_residuals":
-        return _blocked("A campanha já está na última etapa.")
+        return _open("Confira os números e finalize a campanha para voltar à busca do molde.")
     return _blocked("Etapa desconhecida.")
 
 

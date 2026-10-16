@@ -234,7 +234,12 @@ td { padding: 10px; border-top: 1px solid var(--line-soft); color: #c8d5da; font
 .campaign-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .campaign-actions label { display: flex; gap: 6px; align-items: center; font-size: 13px; color: #d5e2e8; }
 .campaign-actions input[type="number"] { width: 110px; height: 38px; }
+.campaign-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.campaign-summary div { padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 7px; background: #0b1620; }
+.campaign-summary span, .campaign-summary small { display: block; color: var(--muted); font-size: 10px; line-height: 1.4; }
+.campaign-summary strong { display: block; margin: 4px 0 2px; font: 700 15px ui-monospace, monospace; color: var(--text); }
 .campaign-live, .focus-meter { font: 600 12px ui-monospace, monospace; color: var(--cyan); }
+.focus-meter[hidden] { display: none; }
 .focus-meter { margin: 8px 0 0; }
 .campaign-list { margin: 8px 0 0; padding-left: 18px; color: #d5e2e8; font-size: 13px; }
 
