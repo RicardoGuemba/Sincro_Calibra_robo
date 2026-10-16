@@ -193,7 +193,7 @@ def test_vcpn_defaults_use_the_full_image_and_operational_offset() -> None:
     assert reference["vcp_offset_mm"] == pytest.approx(55.0)
     assert reference["roi_enabled"] is False
     assert "roi_px" not in reference
-    assert DEFAULT_CONFIG["calibration"]["pick_offset_local_mm"] == [55.0, 0.0]
+    assert DEFAULT_CONFIG["calibration"]["pick_offset_local_mm"] == [0.0, 55.0]
 
 
 @pytest.mark.parametrize(

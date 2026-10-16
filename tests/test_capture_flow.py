@@ -56,32 +56,75 @@ def test_confirm_persists_exactly_one_pair(controller: CaptureController) -> Non
     assert pairs[0]["robot"]["ry"] == pytest.approx(0.0)
 
 
-def test_duplicate_pair_is_rejected(controller: CaptureController) -> None:
+def test_duplicate_pair_warns_and_still_records(controller: CaptureController) -> None:
     session = controller.create_session("Teste duplicidade", [0.0])
     controller.activate_plan(session["id"], 0.0)
     controller.capture()
     controller.decide(True)
-    with pytest.raises(ValueError, match="duplicado"):
-        controller.capture()
+    candidate = controller.capture()
+    assert any("repetir" in item for item in candidate.warnings)
+    controller.decide(True)
+    assert len(controller.storage.list_pairs(session["id"])) == 2
 
 
-def test_unstable_vision_cannot_be_frozen(controller: CaptureController) -> None:
+def test_unstable_vision_warns_and_still_records(controller: CaptureController) -> None:
     unstable = valid_vision()
     object.__setattr__(unstable, "stable", False)
     controller.vision_supplier = lambda: unstable
     session = controller.create_session("Teste gate", [0.0])
     controller.activate_plan(session["id"], 0.0)
-    with pytest.raises(ValueError, match="estável"):
-        controller.capture()
+    readiness = controller.capture_readiness()
+    assert readiness["can_freeze"]
+    assert not readiness["stable"]
+    assert controller.freeze_vision(b"jpeg")["frozen"]
+    candidate = controller.capture()
+    assert any("oscila" in item for item in candidate.warnings)
+    controller.decide(True)
+    assert len(controller.storage.list_pairs(session["id"])) == 1
 
 
-def test_region_gate_rejects_point_outside_suggestion(controller: CaptureController) -> None:
+def test_region_gate_warns_and_still_records(controller: CaptureController) -> None:
     controller.vision_supplier = lambda: valid_vision(850.0, 480.0)
     session = controller.create_session("Teste região", [0.0])
     controller.activate_plan(session["id"], 0.0)
-    assert not controller.capture_readiness()["region"]
-    with pytest.raises(ValueError, match="região útil"):
+    readiness = controller.capture_readiness()
+    assert not readiness["region"]
+    assert readiness["can_freeze"]
+    candidate = controller.capture()
+    assert any("região sugerida" in item for item in candidate.warnings)
+    controller.decide(True)
+    assert len(controller.storage.list_pairs(session["id"])) == 1
+
+
+def test_stale_pose_warns_and_still_registers(controller: CaptureController) -> None:
+    controller.robot_supplier = lambda: replace(valid_robot(), fresh=False)
+    session = controller.create_session("Teste pose", [0.0])
+    controller.activate_plan(session["id"], 0.0)
+    controller.freeze_vision(b"jpeg")
+    readiness = controller.capture_readiness()
+    assert readiness["can_register"]
+    assert not readiness["pose"]
+    candidate = controller.capture()
+    assert any("não é recente" in item for item in candidate.warnings)
+    controller.decide(True)
+    assert len(controller.storage.list_pairs(session["id"])) == 1
+
+
+def test_full_plane_still_accepts_an_extra_point(controller: CaptureController) -> None:
+    session = controller.create_session("Teste extra", [0.0])
+    controller.activate_plan(session["id"], 0.0)
+    for index in range(9):
+        controller.vision_supplier = lambda index=index: valid_vision(80.0 + index * 70.0, 40.0 + index * 40.0)
         controller.capture()
+        controller.decide(True)
+    candidate = controller.capture()
+    assert candidate.point_index == 10
+    assert candidate.region == "Extra"
+    assert any("ponto extra" in item for item in candidate.warnings)
+    controller.decide(True)
+    detail = controller.session_detail(session["id"])
+    assert detail["plans"][0]["suggestion"]["region"] == "Extra"
+    assert len(controller.storage.list_pairs(session["id"])) == 10
 
 
 def test_wrong_robot_z_warns_and_still_registers(controller: CaptureController) -> None:

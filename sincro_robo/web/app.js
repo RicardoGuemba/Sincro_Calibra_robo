@@ -71,14 +71,29 @@ function renderRobot(robot) {
 
 function renderGates(state) {
   const gates = state.capture_readiness || {};
+  const active = Boolean(gates.session && gates.plan);
+  const measured = {
+    single_instance: gates.vision_present,
+    confidence: gates.vision_present,
+    mask_not_cut: gates.vision_present,
+    axis_quality: gates.vision_present,
+    vcp_scale: gates.vision_present,
+    stable: gates.vision_present,
+    region: gates.vision_present,
+    not_duplicate: gates.vision_present,
+    pose: gates.pose_present,
+    plan_z: Boolean(gates.plan_z || gates.plan_z_warning),
+  };
   document.querySelectorAll("#gate-list [data-gate]").forEach((node) => {
-    const ok = Boolean(gates[node.dataset.gate]);
-    const warn = node.dataset.gate === "plan_z" && !ok && Boolean(gates.plan_z_warning);
-    node.classList.toggle("ok", ok);
-    node.classList.toggle("warn", warn);
-    node.title = warn ? gates.plan_z_warning : "";
+    const key = node.dataset.gate;
+    const ok = Boolean(gates[key]);
+    const applicable = Boolean(measured[key]);
+    node.classList.toggle("ok", applicable && ok);
+    node.classList.toggle("warn", active && applicable && !ok);
+    node.title = "";
   });
   const frozen = Boolean(gates.vision_frozen);
+  const advice = Array.isArray(gates.advice) ? gates.advice : [];
   const freezeButton = dom("freeze-button");
   const releaseButton = dom("release-button");
   const captureButton = dom("capture-button");
@@ -89,17 +104,23 @@ function renderGates(state) {
   captureButton.hidden = !frozen;
   captureButton.disabled = !gates.can_register || app.busy;
   const warning = dom("capture-warning");
-  warning.hidden = !gates.plan_z_warning;
-  warning.textContent = gates.plan_z_warning || "";
+  warning.hidden = !advice.length;
+  warning.textContent = advice.length ? `${advice.join(" ")} Isso não impede gravar o ponto.` : "";
   dom("capture-help").textContent = !state.active_session_id
     ? "Ative uma sessão e um plano para começar."
     : state.active_plan_z === null
       ? "Selecione o plano Z em que a coleta será feita."
       : frozen
-        ? "Imagem congelada. Encoste o robô no molde e registre a pose."
+        ? gates.pose_present
+          ? advice.length
+            ? "Imagem congelada. Os avisos são orientação. Grave se a posição estiver certa."
+            : "Imagem congelada. Encoste o robô no molde e registre a pose."
+          : "Imagem congelada. Ainda não há pose do robô para gravar."
         : gates.can_freeze
-          ? "Congele a imagem com o molde visível. O robô entra depois, para não cobrir o molde."
-          : "A imagem congela quando a visão, a estabilidade e a região estiverem verdes.";
+          ? advice.length
+            ? "Há desvios em relação ao recomendado. Você pode congelar mesmo assim. A decisão de gravar é sua."
+            : "Congele a imagem com o molde visível. O robô entra depois, para não cobrir o molde."
+          : "Ainda não há molde na imagem para congelar.";
 }
 
 function renderPlans(session) {
@@ -134,7 +155,13 @@ function renderCaptureTarget(session) {
   dom("current-plane").textContent = plan ? `Z ${fmt(plan.z, 0)} mm` : "Z —";
   dom("next-point").textContent = plan?.suggestion ? `Ponto ${String(plan.suggestion.index).padStart(2, "0")} / ${plan.target}` : plan?.complete ? "Plano concluído" : "Selecione um plano";
   dom("region-name").textContent = plan?.suggestion?.region || "—";
-  dom("point-role").textContent = plan?.suggestion ? (plan.suggestion.role === "validation" ? "ponto de validação" : "ponto de ajuste") : "—";
+  dom("point-role").textContent = plan?.suggestion
+    ? plan.suggestion.region === "Extra"
+      ? "ponto extra, a seu critério"
+      : plan.suggestion.role === "validation"
+        ? "ponto de validação"
+        : "ponto de ajuste"
+    : "—";
   const [x, y] = plan?.suggestion?.normalized || [0.5, 0.5];
   dom("target-dot").style.left = `${x * 100}%`;
   dom("target-dot").style.top = `${y * 100}%`;
@@ -200,7 +227,9 @@ function renderCandidate(candidate) {
   const warnings = candidate.warnings || [];
   const warning = dom("candidate-warnings");
   warning.hidden = !warnings.length;
-  warning.textContent = warnings.join(" ");
+  warning.textContent = warnings.length
+    ? `${warnings.join(" ")} A decisão de gravar é sua.`
+    : "";
   dom("candidate-values").innerHTML = `
     <div><span>Ponto / plano</span><strong>${String(candidate.point_index).padStart(2, "0")} · Z=${fmt(candidate.plan_z, 0)} mm</strong></div>
     <div><span>Região</span><strong>${candidate.region}</strong></div>

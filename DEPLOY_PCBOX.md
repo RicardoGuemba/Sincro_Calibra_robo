@@ -36,7 +36,7 @@ buddmeyer_rfdetr_seg__seg_small__20260915_183353/
 └── metrics.csv
 ```
 
-Esta versão usa `pick_offset_local_mm = [55.0, 0.0]`. Confirme esse vetor no ferramental antes de gravar pares do molde.
+Esta versão usa `pick_offset_local_mm = [0.0, 55.0]`. Confirme esse vetor no ferramental antes de gravar pares do molde.
 
 ## 3. Preflight sem escrita no CLP
 
@@ -66,7 +66,7 @@ Abra `http://<IP_DO_PCBOX>:8080`. Confirme visualmente:
 4. θv horário em `[0°, 180°)` para 0°, 90° e orientações próximas de 179°;
 5. leitura de X/Y/Z/Rx/Ry/Rz contra o watch do Sysmac;
 6. tipo do array e unidades reais de posição/orientação;
-7. sentido local do offset configurado, `[55.0, 0.0]`, contra o ferramental;
+7. sentido local do offset configurado, `[0.0, 55.0]`, contra o ferramental;
 8. câmera liberada corretamente no encerramento.
 
 ## 5. Itens que não podem ser assumidos
