@@ -51,9 +51,6 @@ function renderVision(vision) {
   dom("vision-y").textContent = hasVision ? fmt(vision.y, 1) : "—";
   dom("vision-vcpn-x").textContent = hasVision ? fmt(vision.vcpn_x, 1) : "—";
   dom("vision-vcpn-y").textContent = hasVision ? fmt(vision.vcpn_y, 1) : "—";
-  const roiQuadrant = hasVision && vision.roi_quadrant ? vision.roi_quadrant : null;
-  dom("vision-roi-quadrant-card").hidden = !roiQuadrant;
-  dom("vision-roi-quadrant").textContent = roiQuadrant || "—";
   dom("vision-angle").textContent = hasVision ? fmt(vision.angle_deg, 1) : "—";
   dom("vision-confidence").textContent = hasVision ? `${fmt(vision.confidence * 100, 1)}%` : "—";
   dom("axis-quality").textContent = hasVision ? fmt(vision.axis_quality, 2) : "—";
@@ -75,18 +72,34 @@ function renderRobot(robot) {
 function renderGates(state) {
   const gates = state.capture_readiness || {};
   document.querySelectorAll("#gate-list [data-gate]").forEach((node) => {
-    node.classList.toggle("ok", Boolean(gates[node.dataset.gate]));
+    const ok = Boolean(gates[node.dataset.gate]);
+    const warn = node.dataset.gate === "plan_z" && !ok && Boolean(gates.plan_z_warning);
+    node.classList.toggle("ok", ok);
+    node.classList.toggle("warn", warn);
+    node.title = warn ? gates.plan_z_warning : "";
   });
-  const allOk = ["single_instance", "confidence", "mask_not_cut", "axis_quality", "vcp_scale", "stable", "pose", "region", "plan_z", "not_duplicate"].every((key) => gates[key]);
-  const ready = Boolean(gates.ready);
-  dom("capture-button").disabled = !ready || app.busy;
+  const frozen = Boolean(gates.vision_frozen);
+  const freezeButton = dom("freeze-button");
+  const releaseButton = dom("release-button");
+  const captureButton = dom("capture-button");
+  freezeButton.hidden = frozen;
+  freezeButton.disabled = !gates.can_freeze || app.busy;
+  releaseButton.hidden = !frozen;
+  releaseButton.disabled = app.busy;
+  captureButton.hidden = !frozen;
+  captureButton.disabled = !gates.can_register || app.busy;
+  const warning = dom("capture-warning");
+  warning.hidden = !gates.plan_z_warning;
+  warning.textContent = gates.plan_z_warning || "";
   dom("capture-help").textContent = !state.active_session_id
     ? "Ative uma sessão e um plano para começar."
     : state.active_plan_z === null
       ? "Selecione o plano Z em que a coleta será feita."
-      : !allOk
-        ? "A captura será liberada quando todos os gates estiverem verdes."
-        : "Pronto para congelar visão e pose do robô.";
+      : frozen
+        ? "Imagem congelada. Encoste o robô no molde e registre a pose."
+        : gates.can_freeze
+          ? "Congele a imagem com o molde visível. O robô entra depois, para não cobrir o molde."
+          : "A imagem congela quando a visão, a estabilidade e a região estiverem verdes.";
 }
 
 function renderPlans(session) {
@@ -147,7 +160,23 @@ function renderPairs(session) {
     <td>${fmt(pair.robot.x, 1)} · ${fmt(pair.robot.y, 1)} · ${fmt(pair.robot.z, 1)}</td><td>${fmt(pair.robot.rz, 1)}°</td>
     <td>${pair.residual_xy === null ? "—" : `${fmt(pair.residual_xy)} mm`}</td>
     <td><span class="tag ${pair.status === "suspect" ? "suspect" : ""}">${pair.status === "suspect" ? "suspeito" : "aceito"}</span></td>
-  </tr>`).join("") : '<tr><td colspan="9" class="empty-table">Nenhum ponto gravado nesta sessão.</td></tr>';
+    <td><button type="button" class="button button-secondary button-tiny" data-remove-pair="${pair.id}" data-point-label="ponto ${String(pair.point_index).padStart(2, "0")} em Z ${fmt(pair.plan_z, 0)}">Refazer</button></td>
+  </tr>`).join("") : '<tr><td colspan="10" class="empty-table">Nenhum ponto gravado nesta sessão.</td></tr>';
+  if (!session) return;
+  dom("pairs-table").querySelectorAll("[data-remove-pair]").forEach((button) => {
+    button.addEventListener("click", () => redoPoint(session.id, button.dataset.removePair, button.dataset.pointLabel));
+  });
+}
+
+async function redoPoint(sessionId, pairId, label) {
+  if (!window.confirm(`Refazer ${label}? Esse ponto sai e a próxima captura volta para essa posição.`)) return;
+  try {
+    await api(`/api/sessions/${sessionId}/pairs/${pairId}/remove`, { method: "POST" });
+    await refreshState();
+    toast("Ponto liberado. Capture de novo nessa posição.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 
 function renderSession(session) {
@@ -168,11 +197,15 @@ function renderCandidate(candidate) {
   }
   const v = candidate.vision;
   const r = candidate.robot;
+  const warnings = candidate.warnings || [];
+  const warning = dom("candidate-warnings");
+  warning.hidden = !warnings.length;
+  warning.textContent = warnings.join(" ");
   dom("candidate-values").innerHTML = `
     <div><span>Ponto / plano</span><strong>${String(candidate.point_index).padStart(2, "0")} · Z=${fmt(candidate.plan_z, 0)} mm</strong></div>
     <div><span>Região</span><strong>${candidate.region}</strong></div>
     <div><span>Visão</span><strong>Xv ${fmt(v.x, 1)} · Yv ${fmt(v.y, 1)} · θ ${fmt(v.angle_deg, 1)}°</strong></div>
-    <div><span>VCPn</span><strong>${fmt(v.vcpn_x, 1)} · ${fmt(v.vcpn_y, 1)} px${v.roi_quadrant ? ` · Q ${v.roi_quadrant}` : ""}</strong></div>
+    <div><span>VCPn</span><strong>${fmt(v.vcpn_x, 1)} · ${fmt(v.vcpn_y, 1)} px</strong></div>
     <div><span>Robô</span><strong>X ${fmt(r.x, 1)} · Y ${fmt(r.y, 1)} · Z ${fmt(r.z, 1)} · Rz ${fmt(r.rz, 1)}°</strong></div>`;
   if (!dialog.open) dialog.showModal();
 }
@@ -197,12 +230,18 @@ function render(state) {
   renderCandidate(state.candidate);
 }
 
+let stateEpoch = 0;
+
 async function refreshState() {
+  const epoch = ++stateEpoch;
   try {
-    app.state = await api("/api/state");
+    const state = await api("/api/state");
+    if (epoch !== stateEpoch) return;
+    app.state = state;
     render(app.state);
     if (window.renderCampaign) window.renderCampaign(app.state.campaign);
   } catch (error) {
+    if (epoch !== stateEpoch) return;
     setService("status-camera", { status: "error", error: error.message });
   }
 }
@@ -224,6 +263,33 @@ async function activatePlan(plan) {
   } catch (error) { toast(error.message, "error"); }
 }
 
+async function freezeVision() {
+  if (app.busy) return;
+  app.busy = true;
+  dom("freeze-button").disabled = true;
+  try {
+    await api("/api/capture/freeze", { method: "POST" });
+    toast("Imagem congelada. Posicione o robô e registre o ponto.");
+  } catch (error) { toast(error.message, "error"); }
+  finally {
+    app.busy = false;
+    await refreshState();
+  }
+}
+
+async function releaseVision() {
+  if (app.busy) return;
+  app.busy = true;
+  try {
+    await api("/api/capture/release", { method: "POST" });
+    toast("Imagem ao vivo de novo.");
+  } catch (error) { toast(error.message, "error"); }
+  finally {
+    app.busy = false;
+    await refreshState();
+  }
+}
+
 async function capture() {
   if (app.busy) return;
   app.busy = true;
@@ -236,9 +302,14 @@ async function capture() {
 }
 
 async function decide(confirm) {
+  const warned = Boolean(app.state?.candidate?.warnings?.length);
   try {
     const result = await api("/api/candidate/decision", { method: "POST", body: JSON.stringify({ confirm }) });
-    toast(confirm && result.saved ? "Ponto gravado e validação atualizada." : "Candidato descartado; nenhum dado foi persistido.");
+    toast(
+      confirm && result.saved
+        ? (warned ? "Ponto gravado. O Z diferente do plano ficou só como aviso." : "Ponto gravado e validação atualizada.")
+        : "Candidato descartado. A imagem congelada continua disponível.",
+    );
     await refreshState();
     await refreshSessions();
   } catch (error) { toast(error.message, "error"); }
@@ -292,6 +363,8 @@ dom("session-form").addEventListener("submit", async (event) => {
     toast("Sessão criada. Selecione o primeiro plano Z.");
   } catch (error) { toast(error.message, "error"); }
 });
+dom("freeze-button").addEventListener("click", freezeVision);
+dom("release-button").addEventListener("click", releaseVision);
 dom("capture-button").addEventListener("click", capture);
 dom("cancel-candidate").addEventListener("click", () => decide(false));
 dom("confirm-candidate").addEventListener("click", () => decide(true));

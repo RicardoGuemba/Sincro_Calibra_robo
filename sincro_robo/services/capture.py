@@ -72,6 +72,8 @@ class CaptureController:
         self.active_session_id: str | None = None
         self.active_plan_z: float | None = None
         self._candidate: CaptureCandidate | None = None
+        self._held_vision: VisionObservation | None = None
+        self._held_jpeg: bytes | None = None
         self._lock = threading.RLock()
         self.model_hash = sha256_file(config["model"]["checkpoint"])
         self.revision = git_revision(project_root)
@@ -122,6 +124,8 @@ class CaptureController:
             self.active_session_id = session_id
             self.active_plan_z = None
             self._candidate = None
+            self._held_vision = None
+            self._held_jpeg = None
         return self.session_detail(session_id)
 
     def activate_plan(self, session_id: str, plan_z: float) -> dict[str, Any]:
@@ -136,16 +140,39 @@ class CaptureController:
         with self._lock:
             self.active_plan_z = value
             self._candidate = None
+            self._held_vision = None
+            self._held_jpeg = None
         self.storage.audit(session_id, "plan_activated", {"plan_z": value})
         return self.session_detail(session_id)
 
     def _next_point(self, session_id: str, plan_z: float) -> tuple[int, str, str, tuple[float, float]]:
-        count = len(self.storage.list_pairs(session_id, plan_z))
-        index = count + 1
-        if index > len(POINT_REGIONS):
+        index = self._open_point_index(session_id, plan_z)
+        if index is None:
             raise ValueError("O plano já atingiu o máximo de 9 pontos")
         region, role, target = POINT_REGIONS[index - 1]
         return index, region, role, target
+
+    def _open_point_index(self, session_id: str, plan_z: float) -> int | None:
+        taken = {int(pair["point_index"]) for pair in self.storage.list_pairs(session_id, plan_z)}
+        for index in range(1, len(POINT_REGIONS) + 1):
+            if index not in taken:
+                return index
+        return None
+
+    def remove_point(self, session_id: str, pair_id: str) -> dict[str, Any]:
+        pair = next((item for item in self.storage.list_pairs(session_id) if item["id"] == pair_id), None)
+        if pair is None:
+            raise KeyError(pair_id)
+        self.storage.delete_pair(pair_id)
+        with self._lock:
+            if self._candidate is not None and self._candidate.session_id == session_id:
+                self._candidate = None
+        self.storage.audit(
+            session_id,
+            "point_removed",
+            {"pair_id": pair_id, "plan_z": pair["plan_z"], "point": pair["point_index"]},
+        )
+        return self.session_detail(session_id)
 
     def _check_duplicate(
         self, session_id: str, plan_z: float, observation: VisionObservation
@@ -170,12 +197,36 @@ class CaptureController:
         except ValueError:
             return True
 
+    def held_vision(self) -> VisionObservation | None:
+        with self._lock:
+            return self._held_vision
+
+    def held_jpeg(self) -> bytes | None:
+        with self._lock:
+            return self._held_jpeg
+
+    def release_vision(self) -> None:
+        with self._lock:
+            self._held_vision = None
+            self._held_jpeg = None
+
+    def _plan_warning(self, robot: RobotPoseSnapshot, plan_z: float) -> str | None:
+        tolerance = float(self.config["calibration"]["plan_z_tolerance_mm"])
+        if abs(robot.z - plan_z) <= tolerance:
+            return None
+        return (
+            f"Z do robô ({robot.z:.1f} mm) difere do plano ({plan_z:.1f} ± {tolerance:.0f} mm). "
+            "O ponto pode ser registrado mesmo assim."
+        )
+
     def capture_readiness(self) -> dict[str, Any]:
         with self._lock:
             session_id = self.active_session_id
             plan_z = self.active_plan_z
             candidate_pending = self._candidate is not None
-        vision = self.vision_supplier()
+            held = self._held_vision
+        live = self.vision_supplier()
+        vision = held or live
         robot = self.robot_supplier()
         result: dict[str, Any] = {
             "session": session_id is not None,
@@ -190,34 +241,69 @@ class CaptureController:
             "pose": bool(robot and robot.fresh),
             "region": False,
             "plan_z": False,
+            "plan_z_warning": None,
             "not_duplicate": False,
             "candidate_clear": not candidate_pending,
+            "vision_frozen": held is not None,
+            "can_freeze": False,
+            "can_register": False,
+            "ready": False,
         }
+        if robot is not None and plan_z is not None:
+            warning = self._plan_warning(robot, plan_z)
+            result["plan_z"] = warning is None
+            result["plan_z_warning"] = warning
         if session_id is None or plan_z is None or vision is None:
-            result["ready"] = False
+            result["can_register"] = (
+                held is not None
+                and session_id is not None
+                and plan_z is not None
+                and result["pose"]
+                and not candidate_pending
+            )
+            result["ready"] = result["can_register"]
             return result
         try:
             _index, _region, _role, target = self._next_point(session_id, plan_z)
         except ValueError:
-            result["ready"] = False
             return result
         normalized_x = vision.x / max(1.0, float(vision.frame_width))
         normalized_y = vision.y / max(1.0, float(vision.frame_height))
         radius = float(self.config["calibration"]["target_region_radius_norm"])
         result["region"] = math.hypot(normalized_x - target[0], normalized_y - target[1]) <= radius
         result["not_duplicate"] = not self._is_duplicate(session_id, plan_z, vision)
-        if robot is not None:
-            tolerance = float(self.config["calibration"]["plan_z_tolerance_mm"])
-            result["plan_z"] = abs(robot.z - plan_z) <= tolerance
-        result["ready"] = all(
-            result[key]
-            for key in (
-                "session", "plan", "single_instance", "confidence", "mask_not_cut",
-                "axis_quality", "mask_area", "vcp_scale", "stable", "pose", "region",
-                "plan_z", "not_duplicate", "candidate_clear",
-            )
+        vision_ok = (
+            result["candidate_clear"]
+            and vision.stable
+            and bool(vision.gates)
+            and all(vision.gates.values())
+            and result["region"]
+            and result["not_duplicate"]
         )
+        result["can_freeze"] = vision_ok and held is None and live is not None
+        result["can_register"] = held is not None and result["pose"] and result["candidate_clear"]
+        result["ready"] = result["can_freeze"] or result["can_register"]
         return result
+
+    def freeze_vision(self, jpeg: bytes | None) -> dict[str, Any]:
+        if self.held_vision() is not None:
+            raise ValueError("A imagem já está congelada")
+        if not jpeg:
+            raise ValueError("Ainda não há imagem para congelar")
+        readiness = self.capture_readiness()
+        if not readiness["can_freeze"]:
+            raise ValueError("Mostre o molde estável na região sugerida antes de congelar")
+        vision = self.vision_supplier()
+        if vision is None:
+            raise ValueError("Visão indisponível")
+        with self._lock:
+            session_id = self.active_session_id
+            plan_z = self.active_plan_z
+            self._held_vision = vision
+            self._held_jpeg = jpeg
+        if session_id is not None:
+            self.storage.audit(session_id, "vision_frozen", {"plan_z": plan_z})
+        return {"frozen": True}
 
     def capture(self) -> CaptureCandidate:
         with self._lock:
@@ -225,13 +311,14 @@ class CaptureController:
                 raise ValueError("Já existe um candidato aguardando confirmação")
             session_id = self.active_session_id
             plan_z = self.active_plan_z
+            held = self._held_vision
         if session_id is None or plan_z is None:
             raise ValueError("Ative uma sessão e um plano Z antes da captura")
-        vision = self.vision_supplier()
+        vision = held if held is not None else self.vision_supplier()
         robot = self.robot_supplier()
         if vision is None:
-            raise ValueError("Visão indisponível")
-        if not all(vision.gates.values()) or not vision.stable:
+            raise ValueError("Visão indisponível. Congele a imagem com o molde visível antes de aproximar o robô.")
+        if held is None and (not all(vision.gates.values()) or not vision.stable):
             raise ValueError("A visão ainda não está estável ou não passou nos gates")
         if robot is None or not robot.fresh:
             raise ValueError("Pose do robô indisponível ou desatualizada")
@@ -242,11 +329,7 @@ class CaptureController:
         radius = float(self.config["calibration"]["target_region_radius_norm"])
         if math.hypot(normalized_x - target[0], normalized_y - target[1]) > radius:
             raise ValueError("Molde fora da região útil sugerida para este ponto")
-        z_tolerance = float(self.config["calibration"]["plan_z_tolerance_mm"])
-        if abs(robot.z - plan_z) > z_tolerance:
-            raise ValueError(
-                f"Pose fora do plano: Z={robot.z:.2f} mm; esperado {plan_z:.2f} ± {z_tolerance:.2f} mm"
-            )
+        warning = self._plan_warning(robot, plan_z)
         point_index, region, role, _target = self._next_point(session_id, plan_z)
         candidate = CaptureCandidate(
             id=str(uuid.uuid4()),
@@ -258,6 +341,7 @@ class CaptureController:
             vision=vision,
             robot=robot,
             created_at=utc_now(),
+            warnings=(warning,) if warning else (),
         )
         with self._lock:
             self._candidate = candidate
@@ -282,6 +366,7 @@ class CaptureController:
             )
             return {"saved": False, "candidate_id": candidate.id}
         saved = self.storage.save_candidate(candidate)
+        self.release_vision()
         evaluation = self.evaluate(candidate.session_id, candidate.plan_z, persist_results=True)
         self._maybe_expand(candidate.session_id, candidate.plan_z, evaluation)
         return {"saved": True, "pair": saved, "evaluation": evaluation}
@@ -367,9 +452,9 @@ class CaptureController:
         for plan_z in session["config"]["planes_mm"]:
             plan_pairs = [pair for pair in pairs if float(pair["plan_z"]) == float(plan_z)]
             target = int(session["config"].get("plan_targets", {}).get(str(float(plan_z)), 7))
-            next_point = len(plan_pairs) + 1
+            next_point = self._open_point_index(session_id, float(plan_z))
             suggestion = None
-            if next_point <= min(target, len(POINT_REGIONS)):
+            if next_point is not None and next_point <= min(target, len(POINT_REGIONS)):
                 region, role, normalized = POINT_REGIONS[next_point - 1]
                 suggestion = {"index": next_point, "region": region, "role": role, "normalized": normalized}
             plans.append(

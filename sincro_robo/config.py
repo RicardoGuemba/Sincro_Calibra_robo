@@ -25,6 +25,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "fetch_timeout_ms": 400,
         "reconnect_after_failures": 5,
         "target_fps": 8.0,
+        "max_dimension": 960,
         "width": 960,
         "height": 540,
     },
@@ -51,8 +52,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "vision_reference": {
         "vcp_offset_mm": 55.0,
         "mm_per_px": 1.0,
-        "roi_enabled": True,
-        "roi_px": [189, 103, 277, 277],
+        "roi_enabled": False,
     },
     "vision_quality": {
         "min_confidence": 0.3,

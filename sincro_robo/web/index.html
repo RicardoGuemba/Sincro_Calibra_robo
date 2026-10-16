@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#081018">
   <title>SINCRO_ROBO</title>
-  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/styles.css?v=7">
 </head>
 <body>
   <header class="topbar">
@@ -39,9 +39,16 @@
         <span class="eyebrow">Guia OpenCV · uma etapa por vez</span>
         <h2>Calibração completa</h2>
       </div>
-      <button class="button button-primary" id="new-campaign" type="button">Iniciar campanha</button>
+      <div class="campaign-toolbar">
+        <select id="campaign-select" aria-label="Selecionar campanha">
+          <option value="">Selecionar campanha…</option>
+        </select>
+        <button class="button button-secondary" id="open-campaign" type="button">Abrir</button>
+        <button class="button button-danger" id="delete-campaign" type="button">Excluir</button>
+        <button class="button button-primary" id="new-campaign" type="button">Iniciar campanha</button>
+      </div>
     </div>
-    <p class="campaign-lead">O tabuleiro cobre a câmera. O molde e o RF-DETR entram só na afim. Sem campanha, a coleta atual não muda.</p>
+    <p class="campaign-lead">O tabuleiro cobre a câmera. O molde e o RF-DETR entram só na afim. Escolha uma campanha gravada para continuar da etapa em que ela parou.</p>
     <div id="campaign-body"></div>
   </section>
 
@@ -91,7 +98,6 @@
           <div class="reading angle"><span>Vetor · θ</span><strong id="vision-angle">—</strong><small>graus</small></div>
           <div class="reading major"><span>VCPn X</span><strong id="vision-vcpn-x">—</strong><small>px</small></div>
           <div class="reading major"><span>VCPn Y</span><strong id="vision-vcpn-y">—</strong><small>px</small></div>
-          <div class="reading major" id="vision-roi-quadrant-card" hidden><span>Q</span><strong id="vision-roi-quadrant">—</strong><small>ROI</small></div>
           <div class="quality-block">
             <div><span>Confiança</span><strong id="vision-confidence">—</strong></div>
             <div class="quality-track"><i id="confidence-bar"></i></div>
@@ -153,13 +159,21 @@
             <span data-gate="stable">Visão estável</span>
             <span data-gate="pose">Pose recente</span>
             <span data-gate="region">Região útil</span>
-            <span data-gate="plan_z">Plano Z correto</span>
+            <span data-gate="plan_z">Plano Z</span>
             <span data-gate="not_duplicate">Ponto novo</span>
           </div>
-          <button class="capture-button" id="capture-button" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>
-            <span><strong>CAPTURAR PONTO</strong><small>Congelar visão + pose</small></span>
-          </button>
+          <div class="capture-actions">
+            <button class="capture-button" id="freeze-button" type="button" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>
+              <span><strong>CONGELAR IMAGEM</strong><small>Molde visível, robô fora</small></span>
+            </button>
+            <button class="button button-secondary capture-release" id="release-button" type="button" hidden>Soltar imagem</button>
+            <button class="capture-button" id="capture-button" type="button" hidden disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>
+              <span><strong>REGISTRAR PONTO</strong><small>Pose atual do robô</small></span>
+            </button>
+          </div>
+          <p class="capture-warning" id="capture-warning" hidden></p>
           <p class="capture-help" id="capture-help">Ative uma sessão e um plano para começar.</p>
         </article>
       </aside>
@@ -199,8 +213,8 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>#</th><th>Plano</th><th>Tipo</th><th>Visão (px)</th><th>θv</th><th>Robô XYZ (mm)</th><th>Rz</th><th>Residual XY</th><th>Status</th></tr></thead>
-          <tbody id="pairs-table"><tr><td colspan="9" class="empty-table">Nenhum ponto gravado nesta sessão.</td></tr></tbody>
+          <thead><tr><th>#</th><th>Plano</th><th>Tipo</th><th>Visão (px)</th><th>θv</th><th>Robô XYZ (mm)</th><th>Rz</th><th>Residual XY</th><th>Status</th><th></th></tr></thead>
+          <tbody id="pairs-table"><tr><td colspan="10" class="empty-table">Nenhum ponto gravado nesta sessão.</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -234,13 +248,14 @@
     <div class="confirmation-icon"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v5c0 5 3.4 8.4 8 9 4.6-.6 8-4 8-9V7l-8-4Z"/><path d="m9 12 2 2 4-5"/></svg></div>
     <span class="eyebrow">Candidato congelado</span>
     <h2>Gravar esta posição do robô?</h2>
-    <p>Os valores abaixo estão congelados. Somente <strong>GRAVAR</strong> persiste o par Visão ↔ Robô.</p>
+    <p>A visão ficou na imagem congelada. A pose é a do robô neste momento. Somente <strong>GRAVAR</strong> persiste o par.</p>
+    <p class="candidate-warning" id="candidate-warnings" hidden></p>
     <div class="candidate-grid" id="candidate-values"></div>
     <div class="modal-actions"><button class="button button-secondary" id="cancel-candidate">CANCELAR</button><button class="button button-confirm" id="confirm-candidate">GRAVAR</button></div>
   </dialog>
 
   <div class="toast-region" id="toast-region" aria-live="polite"></div>
-  <script src="/assets/app.js" defer></script>
-  <script src="/assets/campaign.js" defer></script>
+  <script src="/assets/app.js?v=8" defer></script>
+  <script src="/assets/campaign.js?v=12" defer></script>
 </body>
 </html>

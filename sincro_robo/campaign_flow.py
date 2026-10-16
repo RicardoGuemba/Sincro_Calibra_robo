@@ -56,7 +56,7 @@ STAGE_GUIDE: dict[str, dict[str, str]] = {
     },
     "teach_frame": {
         "title": "5. Ensinar origem e eixos",
-        "what": "Com o tabuleiro parado, encoste o TCP na origem vermelha, num ponto ao longo da primeira fileira de cantos (+X) e num ponto ao longo da primeira coluna (+Y). Grave cada pose.",
+        "what": "Congele a imagem com o tabuleiro parado e a origem vermelha visível. Depois encoste o TCP na origem, em +X e em +Y e grave cada pose. O robô cobre o tabuleiro; a imagem congelada continua mostrando o ponto.",
         "why": "solvePnP enxerga o tabuleiro na câmera. Sem estes três toques, essa pose não está no referencial do robô.",
         "gate": "Três poses gravadas e eixos que não sejam quase a mesma reta.",
     },
@@ -68,19 +68,19 @@ STAGE_GUIDE: dict[str, dict[str, str]] = {
     },
     "confirm_direction": {
         "title": "7. Conferir o sentido",
-        "what": "Encoste o TCP no canto interno que está a um quadrado da origem, no eixo X. Compare com as duas previsões.",
+        "what": "Congele a imagem com a origem vermelha visível. Encoste o TCP no canto interno a um quadrado da origem, no eixo X, e compare com as duas previsões.",
         "why": "A previsão certa fica perto do TCP. A invertida cai do outro lado da origem.",
         "gate": "O sentido tabuleiro → câmera precisa ser o de menor erro. O sentido invertido não avança.",
     },
     "validate_planes": {
         "title": "8. Validar os três planos",
-        "what": "Use imagens novas do tabuleiro em Z = 0, 200 e 400 mm, sobre calços de altura conhecida. Não reuse as fotos do ajuste.",
+        "what": "Escolha 0, 200 ou 400 mm, na ordem que for mais fácil. Aceite uma imagem nova do tabuleiro em cada altura. Não reuse as fotos do ajuste.",
         "why": "Medir com as mesmas fotos do cálculo deixa o erro otimista.",
-        "gate": "Pelo menos uma imagem nova em cada plano, com MAE, RMSE e máximo em milímetros.",
+        "gate": "Uma imagem nova em 0, 200 e 400 mm, em qualquer ordem, com MAE, RMSE e máximo em milímetros.",
     },
     "affine_mold": {
         "title": "9. Afim com o molde",
-        "what": "Retire o tabuleiro. A partir daqui o alvo é o molde, visto pelo RF-DETR. Use a coleta já conhecida do app.",
+        "what": "Retire o tabuleiro. Escolha uma coleta de afim já feita ou abra uma nova. O alvo passa a ser o molde, visto pelo RF-DETR.",
         "why": "A afim agora só absorve o resíduo entre o centroide corrigido e o centro da ferramenta.",
         "gate": "A sessão do molde está ligada a este perfil e ao menos um plano já tem modelo.",
     },
@@ -116,7 +116,7 @@ def _filled_cells(captures: list[dict[str, Any]]) -> set[tuple[int, int]]:
 def gate_for(snapshot: dict[str, Any]) -> dict[str, Any]:
     stage = snapshot["stage"]
     captures: list[dict[str, Any]] = snapshot.get("captures") or []
-    if snapshot.get("focus_drift"):
+    if stage == "fix_hardware" and snapshot.get("focus_drift"):
         return _blocked("O foco caiu em relação ao valor travado. Recomece a campanha.")
     if stage == "fix_hardware":
         checks = snapshot.get("checks") or {}
@@ -191,11 +191,14 @@ def gate_for(snapshot: dict[str, Any]) -> dict[str, Any]:
             item for item in _accepted(captures, "validate_planes")
             if item["id"] not in used and item.get("metrics")
         ]
-        for plane in VALIDATION_PLANES_MM:
-            on_plane = [item for item in accepted if _same_plane(item.get("plan_z"), plane)]
-            if not on_plane:
-                return _blocked(f"Falta uma imagem nova em Z = {plane:.0f} mm.")
-        return _open("Os três planos têm validação independente.")
+        missing = [
+            plane for plane in VALIDATION_PLANES_MM
+            if not any(_matches_plane(item.get("plan_z"), plane) for item in accepted)
+        ]
+        if missing:
+            listed = ", ".join(f"{plane:.0f} mm" for plane in missing)
+            return _blocked(f"Escolha entre {listed}. A ordem é livre.")
+        return _open("0, 200 e 400 mm têm validação independente.")
     if stage == "affine_mold":
         if not snapshot.get("affine_session_id"):
             return _blocked("Abra a coleta do molde ligada a este perfil.")
@@ -207,10 +210,10 @@ def gate_for(snapshot: dict[str, Any]) -> dict[str, Any]:
     return _blocked("Etapa desconhecida.")
 
 
-def _same_plane(left: Any, right: float) -> bool:
-    if left is None:
+def _matches_plane(stored: Any, plane: float) -> bool:
+    if stored is None:
         return False
-    return abs(float(left) - float(right)) < 1e-6
+    return abs(float(stored) - float(plane)) < 1e-6
 
 
 def _blocked(reason: str) -> dict[str, Any]:

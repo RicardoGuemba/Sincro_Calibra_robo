@@ -188,11 +188,11 @@ def test_resolve_vcp_scale_rejects_non_positive() -> None:
     assert resolve_vcp_scale_px(0.0, 1.0) == pytest.approx(0.0)
 
 
-def test_vcpn_defaults_match_the_poc_usb_roi_and_operational_offset() -> None:
+def test_vcpn_defaults_use_the_full_image_and_operational_offset() -> None:
     reference = DEFAULT_CONFIG["vision_reference"]
     assert reference["vcp_offset_mm"] == pytest.approx(55.0)
-    assert reference["roi_enabled"] is True
-    assert reference["roi_px"] == [189, 103, 277, 277]
+    assert reference["roi_enabled"] is False
+    assert "roi_px" not in reference
     assert DEFAULT_CONFIG["calibration"]["pick_offset_local_mm"] == [55.0, 0.0]
 
 

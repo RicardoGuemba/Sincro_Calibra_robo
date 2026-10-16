@@ -84,10 +84,64 @@ def test_region_gate_rejects_point_outside_suggestion(controller: CaptureControl
         controller.capture()
 
 
-def test_plan_gate_rejects_wrong_robot_z(controller: CaptureController) -> None:
+def test_wrong_robot_z_warns_and_still_registers(controller: CaptureController) -> None:
     controller.robot_supplier = lambda: replace(valid_robot(), z=200.0)
     session = controller.create_session("Teste plano", [0.0])
     controller.activate_plan(session["id"], 0.0)
-    assert not controller.capture_readiness()["plan_z"]
-    with pytest.raises(ValueError, match="fora do plano"):
+    readiness = controller.capture_readiness()
+    assert not readiness["plan_z"]
+    assert readiness["plan_z_warning"]
+    assert readiness["can_freeze"]
+    candidate = controller.capture()
+    assert candidate.warnings
+    assert "200" in candidate.warnings[0]
+    controller.decide(True)
+    assert len(controller.storage.list_pairs(session["id"])) == 1
+
+
+def test_frozen_image_survives_the_robot_covering_the_mold(controller: CaptureController) -> None:
+    session = controller.create_session("Congelar", [0.0])
+    controller.activate_plan(session["id"], 0.0)
+    frozen = controller.freeze_vision(b"jpeg-mold")
+    assert frozen["frozen"] is True
+    assert controller.held_jpeg() == b"jpeg-mold"
+    controller.vision_supplier = lambda: None
+    controller.robot_supplier = lambda: replace(valid_robot(), x=400.0, y=80.0, z=770.0)
+    readiness = controller.capture_readiness()
+    assert readiness["vision_frozen"] is True
+    assert readiness["can_register"] is True
+    assert readiness["plan_z_warning"]
+    candidate = controller.capture()
+    assert candidate.vision.x == pytest.approx(480.0)
+    assert candidate.robot.x == pytest.approx(400.0)
+    assert candidate.robot.z == pytest.approx(770.0)
+    controller.decide(False)
+    assert controller.held_vision() is not None
+    controller.robot_supplier = lambda: replace(valid_robot(), x=410.0, z=0.0)
+    again = controller.capture()
+    assert again.robot.x == pytest.approx(410.0)
+    assert again.warnings == ()
+    controller.decide(True)
+    assert controller.held_vision() is None
+    pairs = controller.storage.list_pairs(session["id"])
+    assert len(pairs) == 1
+    assert pairs[0]["vision"]["x"] == pytest.approx(480.0)
+    assert pairs[0]["robot"]["x"] == pytest.approx(410.0)
+
+
+def test_removing_a_point_reopens_that_position(controller: CaptureController) -> None:
+    session = controller.create_session("Refazer", [0.0])
+    controller.activate_plan(session["id"], 0.0)
+    for x, y in ((480.0, 270.0), (211.0, 130.0), (749.0, 130.0)):
+        controller.vision_supplier = lambda x=x, y=y: valid_vision(x, y)
         controller.capture()
+        controller.decide(True)
+    middle = next(pair for pair in controller.storage.list_pairs(session["id"], 0.0) if pair["point_index"] == 2)
+    detail = controller.remove_point(session["id"], middle["id"])
+    suggestion = detail["plans"][0]["suggestion"]
+    assert suggestion["index"] == 2
+    assert suggestion["region"] == "Superior esquerda"
+    controller.vision_supplier = lambda: valid_vision(250.0, 150.0)
+    candidate = controller.capture()
+    assert candidate.point_index == 2
+    assert candidate.region == "Superior esquerda"

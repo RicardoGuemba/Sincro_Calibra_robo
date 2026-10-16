@@ -78,6 +78,7 @@ class ApplicationRuntime:
                 settings["device_index"],
                 settings["fetch_timeout_ms"],
                 settings.get("interface", ""),
+                int(settings.get("max_dimension", 960)),
             )
         return SyntheticCamera(settings["width"], settings["height"])
 
@@ -113,6 +114,7 @@ class ApplicationRuntime:
     def start(self) -> None:
         if self._threads:
             return
+        self.campaign.resume_latest()
         self._stop.clear()
         self._threads = [
             threading.Thread(target=self._vision_loop, name="camera-owner", daemon=True),
@@ -171,11 +173,29 @@ class ApplicationRuntime:
             while not self._stop.is_set():
                 started = time.monotonic()
                 try:
+                    try:
+                        self.campaign.sync_scene()
+                    except Exception:
+                        pass
                     if isinstance(camera, SyntheticCamera):
                         scene = self.campaign.camera_scene()
                         camera.scene = "mold" if scene == "mold" else "board"
                         camera.pose_hold = 0 if scene == "focus" else None
                     frame = camera.grab()
+                    held = self.campaign.held_preview()
+                    if held is not None:
+                        failures = 0
+                        network_hint = None
+                        with self.state._lock:
+                            self.state.vision = None
+                            self.state.frame_jpeg = held
+                            self.state.camera_status = "online"
+                            self.state.camera_error = None
+                            self.state.updated_at = utc_now()
+                        remaining = frame_period - (time.monotonic() - started)
+                        if remaining > 0:
+                            self._stop.wait(remaining)
+                        continue
                     try:
                         self.campaign.observe_frame(frame)
                     except Exception:
@@ -206,7 +226,7 @@ class ApplicationRuntime:
                         message = f"{message} — {network_hint}"
                     with self.state._lock:
                         self.state.vision = None
-                        if failures != 1:
+                        if failures != 1 and self.campaign.held_preview() is None:
                             self.state.frame_jpeg = None
                         self.state.camera_status = "error"
                         self.state.camera_error = message
@@ -214,6 +234,42 @@ class ApplicationRuntime:
                     self._stop.wait(frame_period)
                     continue
                 try:
+                    board_preview = self.campaign.camera_scene() != "mold"
+                    if board_preview:
+                        try:
+                            campaign_jpeg = self.campaign.encode_preview(frame)
+                        except Exception:
+                            campaign_jpeg = None
+                        if campaign_jpeg is None:
+                            try:
+                                campaign_jpeg = self.campaign.encode_board_fallback(frame)
+                            except Exception:
+                                campaign_jpeg = None
+                        stability.clear()
+                        with self.state._lock:
+                            self.state.vision = None
+                            self.state.frame_jpeg = campaign_jpeg
+                            self.state.camera_status = "online"
+                            self.state.camera_error = None
+                            self.state.updated_at = utc_now()
+                        remaining = frame_period - (time.monotonic() - started)
+                        if remaining > 0:
+                            self._stop.wait(remaining)
+                        continue
+                    mold_hold = self.controller.held_jpeg()
+                    if mold_hold is not None:
+                        frozen_vision = self.controller.held_vision()
+                        with self.state._lock:
+                            self.state.frame_jpeg = mold_hold
+                            if frozen_vision is not None:
+                                self.state.vision = frozen_vision
+                            self.state.camera_status = "online"
+                            self.state.camera_error = None
+                            self.state.updated_at = utc_now()
+                        remaining = frame_period - (time.monotonic() - started)
+                        if remaining > 0:
+                            self._stop.wait(remaining)
+                        continue
                     result = segmenter.predict(frame) if model_ready else SegmentationResult((), (), ())
                     observation = None
                     display_mask = None
@@ -253,13 +309,8 @@ class ApplicationRuntime:
                         mask_area_cm2,
                         observation.roi_quadrant if observation else None,
                     )
-                    try:
-                        campaign_jpeg = self.campaign.encode_preview(frame)
-                    except Exception:
-                        campaign_jpeg = None
-                    if campaign_jpeg is None:
-                        ok, encoded = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 86])
-                        campaign_jpeg = encoded.tobytes() if ok else None
+                    ok, encoded = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 86])
+                    campaign_jpeg = encoded.tobytes() if ok else None
                     with self.state._lock:
                         self.state.vision = observation
                         self.state.frame_jpeg = campaign_jpeg
@@ -357,6 +408,7 @@ class ApplicationRuntime:
         payload["active_session_id"] = self.controller.active_session_id
         payload["active_plan_z"] = self.controller.active_plan_z
         payload["campaign"] = self.campaign.view()
+        payload["campaigns"] = self.campaign.summaries()
         if self.controller.active_session_id:
             payload["session"] = self.controller.session_detail(self.controller.active_session_id)
         else:

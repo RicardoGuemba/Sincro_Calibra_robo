@@ -1,22 +1,86 @@
 let campaignSignature = "";
 let campaignBusy = false;
+let chosenValidationPlane = null;
 
 function campaignPost(path, body) {
   campaignBusy = true;
   const options = { method: "POST" };
   if (body !== undefined) options.body = JSON.stringify(body);
   return api(path, options)
-    .then(async () => {
+    .then(() => {
       campaignSignature = "";
-      await refreshState();
+      return true;
     })
-    .catch((error) => toast(error.message, "error"))
-    .finally(() => {
+    .catch((error) => {
+      toast(error.message, "error");
+      return false;
+    })
+    .finally(async () => {
       campaignBusy = false;
+      await refreshState();
     });
 }
 
+function campaignWhen(value) {
+  const text = String(value || "");
+  if (text.length < 16) return "";
+  return `${text.slice(8, 10)}/${text.slice(5, 7)} ${text.slice(11, 16)}`;
+}
+
+async function resumeCampaign(campaignId) {
+  try {
+    const resumed = await api(`/api/campaigns/${campaignId}/open`, { method: "POST" });
+    campaignSignature = "";
+    await refreshState();
+    toast(`Campanha retomada em ${resumed.copy.title}.`);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function campaignLabel(item) {
+  const when = campaignWhen(item.created_at);
+  const detail = when ? `${item.stage_title} · ${when}` : item.stage_title;
+  return `${item.name} — ${detail}`;
+}
+
+function syncCampaignButtons() {
+  const select = document.getElementById("campaign-select");
+  const hasChoice = Boolean(select && select.value);
+  const open = document.getElementById("open-campaign");
+  const remove = document.getElementById("delete-campaign");
+  if (open) open.disabled = !hasChoice;
+  if (remove) remove.disabled = !hasChoice;
+}
+
+function paintCampaignList(campaigns, activeId) {
+  const select = document.getElementById("campaign-select");
+  if (!select) return;
+  const items = Array.isArray(campaigns) ? campaigns : [];
+  const signature = `${activeId || ""}|${items.map((item) => `${item.id}:${item.stage}:${item.name}`).join("|")}`;
+  if (select.dataset.signature === signature) return;
+  const previousActive = select.dataset.active || "";
+  const keepSelection = previousActive === (activeId || "") && items.some((item) => item.id === select.value);
+  const chosen = keepSelection ? select.value : (activeId || "");
+  select.replaceChildren();
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = items.length ? "Selecionar campanha…" : "Nenhuma campanha gravada";
+  select.appendChild(placeholder);
+  items.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = campaignLabel(item);
+    select.appendChild(option);
+  });
+  select.value = items.some((item) => item.id === chosen) ? chosen : "";
+  select.dataset.signature = signature;
+  select.dataset.active = activeId || "";
+  syncCampaignButtons();
+}
+
 function renderCampaign(campaign) {
+  paintCampaignList(app.state?.campaigns, campaign?.id);
   const body = document.getElementById("campaign-body");
   if (!body || campaignBusy) return;
   if (!campaign) {
@@ -25,9 +89,11 @@ function renderCampaign(campaign) {
     return;
   }
   const live = document.getElementById("campaign-live");
-  const liveText = campaign.detection?.found
-    ? `Tabuleiro visto · ${campaign.detection.count} cantos`
-    : "Tabuleiro não detectado neste frame";
+  const liveText = campaign.frame_frozen
+    ? `Imagem congelada${campaign.detection?.found ? ` · ${campaign.detection.count} cantos` : ""}`
+    : campaign.detection?.found
+      ? `Tabuleiro visto · ${campaign.detection.count} cantos`
+      : "Tabuleiro não detectado neste frame";
   if (live) live.textContent = liveText;
   paintFocus(campaign);
   const signature = JSON.stringify({
@@ -41,10 +107,13 @@ function renderCampaign(campaign) {
     focusLocked: campaign.focus?.locked_peak,
     reprojection: campaign.reprojection,
     frame: campaign.frame_points,
+    frameFrozen: campaign.frame_frozen,
     direction: campaign.direction_check,
     validation: campaign.validation,
+    validationPlane: campaign.validation_plan_z,
     diagnosis: campaign.diagnosis,
     affine: campaign.affine_session_id,
+    sessions: (app.sessions || []).map((session) => session.id).join(","),
     sha: campaign.profile_sha256,
   });
   if (signature === campaignSignature) return;
@@ -123,13 +192,18 @@ function renderCampaign(campaign) {
     addButton(actions, "A cadeia seguinte usa a imagem corrigida", () => campaignPost("/api/campaigns/active/undistort/confirm"));
   }
   if (stage === "teach_frame") {
-    addButton(actions, "Gravar origem", () => campaignPost("/api/campaigns/active/frame/origin"));
+    if (campaign.frame_frozen) {
+      addButton(actions, "Soltar imagem", () => campaignPost("/api/campaigns/active/preview/release"));
+    } else {
+      addButton(actions, "Congelar imagem", () => campaignPost("/api/campaigns/active/preview/freeze"));
+    }
+    addButton(actions, "Gravar origem", () => campaignPost("/api/campaigns/active/frame/origin"), true);
     addButton(actions, "Gravar +X", () => campaignPost("/api/campaigns/active/frame/plus_x"), true);
     addButton(actions, "Gravar +Y", () => campaignPost("/api/campaigns/active/frame/plus_y"), true);
     const note = document.createElement("span");
-    note.textContent = app.config?.mode?.plc === "synthetic"
-      ? "No simulador, a pose CIP já está no ponto certo a cada gravação."
-      : "Encoste o TCP no ponto e grave. O app só lê a pose, não move o robô.";
+    note.textContent = campaign.frame_frozen
+      ? "Imagem parada. Encoste o TCP nos pontos marcados e grave. O robô pode cobrir o tabuleiro."
+      : "Congele só quando a origem vermelha estiver visível. A pose do robô continua ao vivo.";
     actions.appendChild(note);
   }
   if (stage === "solve_extrinsic") {
@@ -137,12 +211,19 @@ function renderCampaign(campaign) {
     addButton(actions, "Calcular solvePnP", () => campaignPost("/api/campaigns/active/extrinsic/solve"), true);
   }
   if (stage === "confirm_direction") {
-    addButton(actions, "Gravar TCP neste canto", () => campaignPost("/api/campaigns/active/direction/touch"));
+    if (campaign.frame_frozen) {
+      addButton(actions, "Soltar imagem", () => campaignPost("/api/campaigns/active/preview/release"));
+    } else {
+      addButton(actions, "Congelar imagem", () => campaignPost("/api/campaigns/active/preview/freeze"));
+    }
+    addButton(actions, "Gravar TCP neste canto", () => campaignPost("/api/campaigns/active/direction/touch"), true);
     addButton(actions, "Confirmar tabuleiro → câmera", () => campaignPost("/api/campaigns/active/direction/confirm", { sense: "object_to_camera" }), true);
     const touchNote = document.createElement("span");
-    touchNote.textContent = app.config?.mode?.plc === "synthetic"
-      ? "No simulador, a pose já está no canto a um quadrado da origem."
-      : "Encoste o TCP no canto interno a um quadrado da origem, no eixo dos 9 cantos.";
+    touchNote.textContent = campaign.frame_frozen
+      ? "Imagem parada. Encoste o TCP no canto e grave. O robô pode cobrir o tabuleiro."
+      : app.config?.mode?.plc === "synthetic"
+        ? "No simulador, a pose já está no canto a um quadrado da origem."
+        : "Congele com a origem vermelha visível. Depois encoste o TCP no canto interno a um quadrado da origem, no eixo X.";
     actions.appendChild(touchNote);
     if (campaign.direction_check) {
       const note = document.createElement("span");
@@ -151,18 +232,56 @@ function renderCampaign(campaign) {
     }
   }
   if (stage === "validate_planes") {
+    const recorded = Array.isArray(campaign.validation) ? campaign.validation : [];
+    const serverPlane = Number(campaign.validation_plan_z);
+    if (chosenValidationPlane !== null && Math.abs(serverPlane - chosenValidationPlane) < 1) {
+      chosenValidationPlane = null;
+    }
+    const selected = chosenValidationPlane ?? serverPlane;
     [0, 200, 400].forEach((plane) => {
-      const metric = campaign.validation[String(plane)];
-      const label = metric ? `Z ${plane} · RMSE ${Number(metric.rmse).toFixed(1)} mm` : `Selecionar Z ${plane}`;
-      addButton(actions, label, () => campaignPost("/api/campaigns/active/validation/plane", { plan_z: plane }), plane !== 0);
+      const metric = recorded.find((item) => Math.abs(Number(item.z) - plane) < 1);
+      const chosen = Math.abs(selected - plane) < 1e-6;
+      const label = metric
+        ? `Z ${plane} · RMSE ${Number(metric.rmse).toFixed(1)} mm`
+        : chosen
+          ? `Z ${plane} mm · escolhida`
+          : `Z ${plane} mm`;
+      const button = addButton(actions, label, () => chooseValidationPlane(plane), !chosen);
+      button.dataset.plane = String(plane);
     });
-    addButton(actions, "Aceitar imagem nova deste plano", () => campaignPost("/api/campaigns/active/captures", { decision: "accepted" }));
+    addButton(actions, `Aceitar imagem em Z ${Number.isFinite(selected) ? selected : 0} mm`, () => {
+      acceptValidationImage(chosenValidationPlane ?? selected);
+    });
   }
   if (stage === "affine_mold") {
-    addButton(actions, "Abrir coleta do molde", () => campaignPost("/api/campaigns/active/affine/open"));
+    const sessions = Array.isArray(app.sessions) ? app.sessions : [];
+    const select = document.createElement("select");
+    select.id = "affine-session-select";
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Escolher coleta já feita…";
+    select.appendChild(placeholder);
+    sessions.forEach((session) => {
+      const option = document.createElement("option");
+      option.value = session.id;
+      option.textContent = session.name;
+      if (session.id === campaign.affine_session_id) option.selected = true;
+      select.appendChild(option);
+    });
+    actions.appendChild(select);
+    addButton(actions, "Usar esta coleta", () => {
+      const id = document.getElementById("affine-session-select")?.value;
+      if (!id) {
+        toast("Escolha uma coleta já feita.", "error");
+        return;
+      }
+      campaignPost("/api/campaigns/active/affine/use", { session_id: id });
+    });
+    addButton(actions, "Abrir coleta nova", () => campaignPost("/api/campaigns/active/affine/open"), true);
     if (campaign.affine_session_id) {
       const note = document.createElement("span");
-      note.textContent = "Sessão do molde aberta. Use CAPTURAR PONTO na coleta abaixo. O centroide entra corrigido.";
+      const label = campaign.affine_session_name || "Sessão do molde";
+      note.textContent = `${label} ligada a este perfil. Use CAPTURAR PONTO para acrescentar pontos. O centroide entra corrigido.`;
       actions.appendChild(note);
     }
     if (campaign.profile_sha256) {
@@ -184,9 +303,42 @@ function renderCampaign(campaign) {
       addButton(actions, "Aplicar RANSAC nos outliers", () => campaignPost("/api/campaigns/active/ransac"));
     }
   }
+  if (campaign.stage_index > 0) {
+    addButton(actions, "Voltar", () => {
+      if (!window.confirm("Voltar para a etapa anterior? As medições já gravadas permanecem.")) return;
+      campaignPost("/api/campaigns/active/retreat");
+    }, true);
+  }
   if (campaign.gate.passed && stage !== "analyze_residuals") {
     addButton(actions, "Avançar", () => campaignPost("/api/campaigns/active/advance"));
   }
+}
+
+function acceptValidationImage(plane) {
+  const height = Number(plane);
+  campaignPost("/api/campaigns/active/validation/plane", { plan_z: height }).then((ok) => {
+    if (!ok) return;
+    campaignPost("/api/campaigns/active/captures", { decision: "accepted" });
+  });
+}
+
+function chooseValidationPlane(plane) {
+  chosenValidationPlane = plane;
+  document.querySelectorAll("#campaign-actions [data-plane]").forEach((button) => {
+    const chosen = Number(button.dataset.plane) === plane;
+    button.className = chosen ? "button button-primary" : "button button-secondary";
+    if (!button.textContent.includes("RMSE")) {
+      button.textContent = chosen ? `Z ${plane} mm · escolhida` : `Z ${button.dataset.plane} mm`;
+    }
+  });
+  const accept = [...document.querySelectorAll("#campaign-actions button")].find((button) => button.textContent.startsWith("Aceitar imagem em Z"));
+  if (accept) accept.textContent = `Aceitar imagem em Z ${plane} mm`;
+  campaignPost("/api/campaigns/active/validation/plane", { plan_z: plane }).then(async (ok) => {
+    if (ok || chosenValidationPlane !== plane) return;
+    chosenValidationPlane = null;
+    campaignSignature = "";
+    await refreshState();
+  });
 }
 
 function paintFocus(campaign) {
@@ -207,7 +359,39 @@ function addButton(parent, label, onClick, secondary = false) {
   button.textContent = label;
   button.addEventListener("click", onClick);
   parent.appendChild(button);
+  return button;
 }
+
+document.getElementById("campaign-select").addEventListener("change", syncCampaignButtons);
+
+document.getElementById("open-campaign").addEventListener("click", () => {
+  const id = document.getElementById("campaign-select").value;
+  if (!id) {
+    toast("Escolha uma campanha para abrir.", "error");
+    return;
+  }
+  resumeCampaign(id);
+});
+
+document.getElementById("delete-campaign").addEventListener("click", async () => {
+  const select = document.getElementById("campaign-select");
+  const id = select.value;
+  if (!id) {
+    toast("Escolha a campanha que deseja excluir.", "error");
+    return;
+  }
+  const label = select.selectedOptions[0]?.textContent || "esta campanha";
+  if (!window.confirm(`Excluir ${label}? As capturas desta campanha também saem.`)) return;
+  try {
+    await api(`/api/campaigns/${id}`, { method: "DELETE" });
+    campaignSignature = "";
+    select.dataset.signature = "";
+    await refreshState();
+    toast("Campanha excluída.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+});
 
 document.getElementById("new-campaign").addEventListener("click", () => {
   const corners = app.config && app.config.board_inner_corners;

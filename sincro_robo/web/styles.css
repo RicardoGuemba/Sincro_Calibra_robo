@@ -66,7 +66,9 @@ select:focus, input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .button:disabled { opacity: .42; cursor: not-allowed; }
 .button-primary { background: var(--teal); color: #06251f; }
 .button-secondary { background: #142430; border-color: #314653; color: #d8e5e9; }
+.button-danger { background: #38201f; border-color: #623431; color: #ffd0ce; }
 .button-confirm { background: var(--teal); color: #052a22; min-width: 150px; }
+.button-tiny { height: 28px; padding: 0 8px; font-size: 11px; }
 
 .main-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(360px, .7fr); gap: 16px; }
 .vision-panel { padding: 17px; min-height: 655px; }
@@ -131,7 +133,12 @@ select:focus, input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .gate-list span:before { content: ""; position: absolute; left: 9px; top: 9px; width: 6px; height: 6px; border-radius: 50%; background: #526674; }
 .gate-list span.ok { color: #b8e8dc; background: #102823; }
 .gate-list span.ok:before { background: var(--teal); box-shadow: 0 0 7px var(--teal); }
+.gate-list span.warn { color: #f3d7a1; background: #2a2416; }
+.gate-list span.warn:before { background: #e0a84a; box-shadow: 0 0 7px #e0a84a; }
+.capture-actions { display: flex; flex-direction: column; gap: 8px; }
 .capture-button { width: 100%; min-height: 64px; display: flex; align-items: center; justify-content: center; gap: 12px; border: 1px solid #287f6e; border-radius: 8px; background: linear-gradient(135deg, #1b7767, #155a50); cursor: pointer; box-shadow: inset 0 1px rgb(255 255 255 / 8%); }
+.capture-button[hidden], .capture-release[hidden], .capture-warning[hidden], .candidate-warning[hidden] { display: none; }
+.capture-release { width: 100%; height: 36px; }
 .capture-button:disabled { opacity: .34; cursor: not-allowed; filter: grayscale(.45); }
 .capture-button svg { width: 24px; fill: none; stroke: #dffff7; stroke-width: 1.6; }
 .capture-button span { text-align: left; }
@@ -139,6 +146,7 @@ select:focus, input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .capture-button strong { letter-spacing: .06em; }
 .capture-button small { margin-top: 3px; color: #b7e3da; font-size: 9px; }
 .capture-help { margin: 9px 0 0; text-align: center; color: var(--muted); font-size: 9px; }
+.capture-warning, .candidate-modal > p.candidate-warning { margin: 8px auto 0; padding: 8px 10px; border-radius: 6px; background: #2a2416; color: #f3d7a1; font-size: 11px; line-height: 1.45; text-align: center; max-width: 410px; }
 
 .lower-grid { display: grid; grid-template-columns: 1.25fr .75fr; gap: 16px; margin-top: 16px; }
 .plan-panel, .metrics-panel, .history-panel { padding: 17px; }
@@ -210,7 +218,9 @@ td { padding: 10px; border-top: 1px solid var(--line-soft); color: #c8d5da; font
 .toast.error { border-left-color: var(--red); }
 @keyframes toast-in { from { transform: translateY(8px); opacity: 0; } }
 
-.campaign-panel { margin: 18px 30px 0; }
+.campaign-panel { margin: 18px 30px 0; padding: 17px; }
+.campaign-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
+.campaign-toolbar select { min-width: 280px; max-width: 420px; }
 .campaign-lead { margin: 0 0 14px; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .campaign-rail { display: flex; gap: 6px; overflow-x: auto; margin-bottom: 14px; }
 .campaign-rail span { flex: 0 0 auto; padding: 6px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--faint); font-size: 11px; }
@@ -223,6 +233,7 @@ td { padding: 10px; border-top: 1px solid var(--line-soft); color: #c8d5da; font
 .campaign-gate.open { background: #12352f; color: var(--teal); }
 .campaign-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .campaign-actions label { display: flex; gap: 6px; align-items: center; font-size: 13px; color: #d5e2e8; }
+.campaign-actions input[type="number"] { width: 110px; height: 38px; }
 .campaign-live, .focus-meter { font: 600 12px ui-monospace, monospace; color: var(--cyan); }
 .focus-meter { margin: 8px 0 0; }
 .campaign-list { margin: 8px 0 0; padding-left: 18px; color: #d5e2e8; font-size: 13px; }

@@ -8,6 +8,24 @@ import cv2
 import numpy as np
 
 
+SAFETY_MAX_DIMENSION = 1920
+
+
+def resize_output(image: np.ndarray, max_dimension: int = 960) -> np.ndarray:
+    """Cap the longer side the same way as realtec_vision_buddmeyer_v2108.
+
+    A non-positive limit falls back to the 1920 px safety ceiling. Frames already
+    inside the limit are returned unchanged.
+    """
+    height, width = image.shape[:2]
+    limit = int(max_dimension) if int(max_dimension) > 0 else SAFETY_MAX_DIMENSION
+    if width <= limit and height <= limit:
+        return image
+    scale = min(limit / width, limit / height, 1.0)
+    output_size = (int(round(width * scale)), int(round(height * scale)))
+    return cv2.resize(image, output_size, interpolation=cv2.INTER_AREA)
+
+
 class SyntheticCamera:
     """Repeatable camera simulator used only for local development and tests."""
 
@@ -86,10 +104,17 @@ class StApiCamera:
         "BayerBG": cv2.COLOR_BayerBGGR2BGR,
     }
 
-    def __init__(self, device_index: int = 0, fetch_timeout_ms: int = 400, interface: str = "") -> None:
+    def __init__(
+        self,
+        device_index: int = 0,
+        fetch_timeout_ms: int = 400,
+        interface: str = "",
+        max_dimension: int = 960,
+    ) -> None:
         self.device_index = int(device_index)
         self.fetch_timeout_ms = int(fetch_timeout_ms)
         self.interface = str(interface or "").strip()
+        self.max_dimension = int(max_dimension)
         self._st: Any = None
         self._system: Any = None
         self._device: Any = None
@@ -231,13 +256,16 @@ class StApiCamera:
             raise TimeoutError("Timeout ao aguardar frame StApi")
         if hasattr(retrieved, "__enter__"):
             with retrieved as buffer:
-                return self._read_buffer(buffer)
-        try:
-            return self._read_buffer(retrieved)
-        finally:
-            release = getattr(retrieved, "release", None)
-            if callable(release):
-                release()
+                frame = self._read_buffer(buffer)
+        else:
+            try:
+                frame = self._read_buffer(retrieved)
+            finally:
+                release = getattr(retrieved, "release", None)
+                if callable(release):
+                    release()
+            return resize_output(frame, self.max_dimension)
+        return resize_output(frame, self.max_dimension)
 
     def close(self) -> None:
         self._assert_owner()

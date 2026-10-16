@@ -179,6 +179,12 @@ class Storage:
             )
         self.audit(session_id, "plan_target_changed", {"plan_z": plan_z, "target": target})
 
+    def delete_pair(self, pair_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM pairs WHERE id = ?", (pair_id,))
+            if cursor.rowcount != 1:
+                raise KeyError(pair_id)
+
     def list_pairs(self, session_id: str, plan_z: float | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM pairs WHERE session_id = ?"
         params: list[Any] = [session_id]
@@ -300,6 +306,30 @@ class Storage:
                 "SELECT id FROM calibration_campaigns ORDER BY created_at DESC"
             ).fetchall()
         return [campaign for row in rows if (campaign := self.get_campaign(row["id"]))]
+
+    def list_campaign_summaries(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, name, created_at, stage, status
+                FROM calibration_campaigns
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_campaign(self, campaign_id: str) -> None:
+        campaign = self.get_campaign(campaign_id)
+        if campaign is None:
+            raise KeyError(campaign_id)
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM calibration_campaigns WHERE id = ?",
+                (campaign_id,),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(campaign_id)
+        self.audit(campaign_id, "campaign_deleted", {"name": campaign["name"]})
 
     def save_campaign_state(self, campaign_id: str, stage: str, state: dict[str, Any], status: str = "active") -> None:
         with self._lock, self._connect() as connection:

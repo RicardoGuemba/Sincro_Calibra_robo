@@ -9,7 +9,8 @@
     "interface": "enp3s0",
     "fetch_timeout_ms": 1500,
     "reconnect_after_failures": 5,
-    "target_fps": 8.0
+    "target_fps": 8.0,
+    "max_dimension": 960
   },
   "model": {
     "provider": "rfdetr",
