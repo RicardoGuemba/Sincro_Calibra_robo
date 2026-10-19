@@ -257,6 +257,7 @@ function render(state) {
   renderGates(state);
   renderSession(state.session);
   renderCandidate(state.candidate);
+  paintProjectCampaigns(state.campaigns);
 }
 
 let stateEpoch = 0;
@@ -397,6 +398,118 @@ dom("release-button").addEventListener("click", releaseVision);
 dom("capture-button").addEventListener("click", capture);
 dom("cancel-candidate").addEventListener("click", () => decide(false));
 dom("confirm-candidate").addEventListener("click", () => decide(true));
+let projectCatalog = null;
+
+function paintProjectCampaigns(campaigns) {
+  const select = dom("project-campaign");
+  if (!select) return;
+  const items = Array.isArray(campaigns) ? campaigns : [];
+  const signature = items.map((item) => `${item.id}:${item.status}:${item.name}`).join("|");
+  if (select.dataset.signature === signature) return;
+  const previous = select.value;
+  select.replaceChildren(new Option("Selecionar campanha…", ""));
+  items.forEach((item) => {
+    const closed = item.status === "closed" ? " · fechada" : "";
+    select.appendChild(new Option(`${item.name}${closed}`, item.id));
+  });
+  select.dataset.signature = signature;
+  select.value = items.some((item) => item.id === previous) ? previous : "";
+  if (select.value !== previous) loadProjectionPlanes();
+}
+
+function projectionPlane() {
+  return (projectCatalog?.planes || []).find((plane) => String(plane.z) === dom("project-plane").value);
+}
+
+function paintProjectionFormula() {
+  const result = dom("project-result");
+  const plane = projectionPlane();
+  if (!result || !plane?.relation) return;
+  result.hidden = false;
+  result.replaceChildren();
+  const formula = document.createElement("p");
+  formula.className = "project-formula";
+  formula.textContent = `u, v = correção da lente\nX_robo = ${plane.relation.x_robo}\nY_robo = ${plane.relation.y_robo}`;
+  result.appendChild(formula);
+}
+
+async function loadProjectionPlanes() {
+  const campaignId = dom("project-campaign").value;
+  const planeSelect = dom("project-plane");
+  const result = dom("project-result");
+  projectCatalog = null;
+  planeSelect.replaceChildren();
+  if (result) {
+    result.hidden = true;
+    result.replaceChildren();
+  }
+  if (!campaignId) {
+    planeSelect.appendChild(new Option("Escolha a campanha", ""));
+    return;
+  }
+  try {
+    projectCatalog = await api(`/api/campaigns/${campaignId}/projection`);
+    const ready = projectCatalog.planes.filter((plane) => plane.ready);
+    if (!ready.length) {
+      planeSelect.appendChild(new Option("Sem afim pronta", ""));
+      toast("Esta campanha ainda não tem afim no pixel corrigido.", "error");
+      return;
+    }
+    ready.forEach((plane) => planeSelect.appendChild(new Option(`Z ${plane.z} mm`, String(plane.z))));
+    paintProjectionFormula();
+  } catch (error) {
+    planeSelect.appendChild(new Option("Indisponível", ""));
+    toast(error.message, "error");
+  }
+}
+
+async function projectPixel(event) {
+  event.preventDefault();
+  const campaignId = dom("project-campaign").value;
+  const planZ = dom("project-plane").value;
+  if (!campaignId || planZ === "") {
+    toast("Escolha a campanha e o plano Z.", "error");
+    return;
+  }
+  try {
+    const projected = await api(`/api/campaigns/${campaignId}/projection`, {
+      method: "POST",
+      body: JSON.stringify({
+        x_camera: Number(dom("project-x").value),
+        y_camera: Number(dom("project-y").value),
+        plan_z: Number(planZ),
+      }),
+    });
+    const result = dom("project-result");
+    result.hidden = false;
+    result.replaceChildren();
+    const answer = document.createElement("div");
+    answer.className = "project-answer";
+    [["X robô", projected.x_robo], ["Y robô", projected.y_robo]].forEach(([label, value]) => {
+      const card = document.createElement("div");
+      const caption = document.createElement("span");
+      caption.textContent = label;
+      const strong = document.createElement("strong");
+      strong.textContent = `${fmt(value, 2)} mm`;
+      card.append(caption, strong);
+      answer.appendChild(card);
+    });
+    const formula = document.createElement("p");
+    formula.className = "project-formula";
+    formula.textContent = `u = ${fmt(projected.u_rectified_px, 2)} px · v = ${fmt(projected.v_rectified_px, 2)} px\nX_robo = ${projected.relation.x_robo}\nY_robo = ${projected.relation.y_robo}`;
+    const optical = document.createElement("div");
+    optical.className = "project-side";
+    const opticalLabel = document.createElement("span");
+    opticalLabel.textContent = "Extrínseca no plano";
+    optical.append(opticalLabel, document.createTextNode(` X ${fmt(projected.optical_x_mm, 2)} mm · Y ${fmt(projected.optical_y_mm, 2)} mm · Z ${fmt(projected.plane_z_mm, 0)} mm`));
+    result.append(answer, formula, optical);
+  } catch (error) { toast(error.message, "error"); }
+}
+
+dom("project-campaign").addEventListener("change", loadProjectionPlanes);
+dom("project-plane").addEventListener("change", paintProjectionFormula);
+dom("project-form").addEventListener("submit", projectPixel);
+
 dom("export-button").addEventListener("click", async () => {
   if (!app.state?.active_session_id) return;
   try {

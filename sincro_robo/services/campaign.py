@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from ..calibration import fit_plan_calibration
+from ..projection import affine_relation, camera_to_robot
 from ..campaign_flow import BOARD_STAGES, STAGE_GUIDE, STAGES, coverage_view, gate_for, next_stage
 from ..domain import utc_now
 from ..optics import (
@@ -305,6 +306,97 @@ class CampaignController:
         self._reset_focus_tracker()
         self.storage.audit(campaign["id"], "campaign_finished", {"stage": campaign["stage"]})
         return {"id": campaign["id"], "closed": True, "status": "closed"}
+
+    def projection_catalog(self, campaign_id: str) -> dict[str, Any]:
+        campaign, _profile, detail = self._projection_context(campaign_id)
+        planes = [self._projection_plane(plan) for plan in detail["plans"]]
+        return {
+            "campaign_id": campaign["id"],
+            "campaign_name": campaign["name"],
+            "profile_sha256": campaign["state"].get("profile_sha256"),
+            "planes": planes,
+        }
+
+    def project_pixel(
+        self,
+        campaign_id: str,
+        x_camera: float,
+        y_camera: float,
+        plan_z: float | None = None,
+    ) -> dict[str, Any]:
+        campaign, profile, detail = self._projection_context(campaign_id)
+        plan = self._projection_plan_choice(detail["plans"], plan_z)
+        model = plan["evaluation"]["model"]
+        intrinsic = profile["intrinsic"]
+        extrinsic = profile["extrinsic"]
+        projected = camera_to_robot(
+            float(x_camera),
+            float(y_camera),
+            camera_matrix=intrinsic["camera_matrix"],
+            dist_coeffs=intrinsic["dist_coeffs"],
+            rectified_camera_matrix=intrinsic["rectified_camera_matrix"],
+            robot_from_camera=extrinsic["robot_from_camera"],
+            plane_z_mm=float(plan["z"]),
+            affine=model["affine"],
+        )
+        result = {
+            "campaign_id": campaign["id"],
+            "campaign_name": campaign["name"],
+            "profile_sha256": campaign["state"].get("profile_sha256"),
+            **projected,
+        }
+        return result
+
+    def _projection_context(self, campaign_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        campaign = self.storage.get_campaign(campaign_id)
+        if campaign is None:
+            raise KeyError(campaign_id)
+        profile = campaign["state"].get("profile") or {}
+        intrinsic = profile.get("intrinsic") or {}
+        extrinsic = profile.get("extrinsic") or {}
+        if not intrinsic.get("camera_matrix") or not extrinsic.get("robot_from_camera"):
+            raise ValueError("A campanha ainda não fechou a intrínseca e a extrínseca.")
+        session_id = campaign["state"].get("affine_session_id")
+        if not session_id:
+            raise ValueError("Esta campanha não tem coleta de molde ligada.")
+        try:
+            detail = self.capture.session_detail(session_id)
+        except KeyError as error:
+            raise ValueError("A coleta de molde ligada a esta campanha não existe mais.") from error
+        return campaign, profile, detail
+
+    @staticmethod
+    def _projection_plane(plan: dict[str, Any]) -> dict[str, Any]:
+        evaluation = plan["evaluation"]
+        model = evaluation.get("model") or {}
+        ready = bool(evaluation.get("ready")) and model.get("input_space") == "undistorted_px_K_rect"
+        item: dict[str, Any] = {
+            "z": float(plan["z"]),
+            "ready": ready,
+            "reason": None if ready else evaluation.get("reason") or "A afim deste plano ainda não está no pixel retificado.",
+        }
+        if ready:
+            item["relation"] = affine_relation(model["affine"])
+        return item
+
+    def _projection_plan_choice(self, plans: list[dict[str, Any]], plan_z: float | None) -> dict[str, Any]:
+        described = [self._projection_plane(plan) for plan in plans]
+        ready = [item for item in described if item["ready"]]
+        if plan_z is None:
+            if len(ready) == 1:
+                plan_z = float(ready[0]["z"])
+            elif not ready:
+                raise ValueError("Nenhum plano desta campanha tem afim pronta.")
+            else:
+                heights = ", ".join(f"{item['z']:g}" for item in ready)
+                raise ValueError(f"Escolha o plano Z. Há afim pronta em {heights} mm.")
+        chosen = next((plan for plan in plans if abs(float(plan["z"]) - float(plan_z)) < 1e-6), None)
+        if chosen is None:
+            raise ValueError("Este plano não faz parte da coleta de molde.")
+        described_choice = self._projection_plane(chosen)
+        if not described_choice["ready"]:
+            raise ValueError(str(described_choice["reason"]))
+        return chosen
 
     def observe_frame(self, frame_bgr: np.ndarray) -> dict[str, Any] | None:
         self._detection_ready = False

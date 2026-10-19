@@ -3,19 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#081018">
+  <meta name="theme-color" content="#000000">
   <title>SINCRO_ROBO</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=8">
+  <link rel="stylesheet" href="/assets/styles.css?v=10">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true">
-        <span></span><span></span><span></span>
-      </div>
+      <img class="brand-logo" src="/assets/logo-rtc.png" alt="RTC">
       <div>
+        <p>Integração Industrial</p>
         <h1>SINCRO<span>_ROBO</span></h1>
-        <p>Sincronismo visão ↔ robô</p>
       </div>
     </div>
     <div class="topbar-center" id="clock">--:--:--</div>
@@ -33,6 +31,7 @@
     <span class="version" id="version-label">v--</span>
   </div>
 
+  <div class="shell">
   <section class="panel campaign-panel" id="campaign-panel">
     <div class="panel-heading compact">
       <div>
@@ -206,6 +205,24 @@
       </article>
     </section>
 
+    <section class="panel project-panel" id="project-panel">
+      <div class="panel-heading compact">
+        <div>
+          <span class="eyebrow">Lente, extrínseca e afim</span>
+          <h2>Câmera para robô</h2>
+        </div>
+      </div>
+      <form class="project-form" id="project-form">
+        <label>Campanha<select id="project-campaign" aria-label="Campanha da projeção"><option value="">Selecionar campanha…</option></select></label>
+        <label>Plano Z<select id="project-plane" aria-label="Plano Z da afim"><option value="">Escolha a campanha</option></select></label>
+        <label>X câmera<input id="project-x" type="number" step="0.01" inputmode="decimal" required></label>
+        <label>Y câmera<input id="project-y" type="number" step="0.01" inputmode="decimal" required></label>
+        <button class="button button-primary" type="submit">Calcular</button>
+      </form>
+      <p class="project-note">X e Y do robô são o centro geométrico: a afim do pixel já corrigido pela lente. A extrínseca informa onde o mesmo pixel cai no plano Z.</p>
+      <div class="project-result" id="project-result" hidden></div>
+    </section>
+
     <section class="panel history-panel">
       <div class="panel-heading compact">
         <div><span class="eyebrow">Trilha auditável</span><h2>Pontos confirmados</h2></div>
@@ -219,6 +236,7 @@
       </div>
     </section>
   </main>
+  </div>
 
   <dialog id="campaign-dialog" class="modal">
     <form method="dialog" id="campaign-form">
@@ -255,7 +273,7 @@
   </dialog>
 
   <div class="toast-region" id="toast-region" aria-live="polite"></div>
-  <script src="/assets/app.js?v=9" defer></script>
+  <script src="/assets/app.js?v=10" defer></script>
   <script src="/assets/campaign.js?v=14" defer></script>
 </body>
 </html>

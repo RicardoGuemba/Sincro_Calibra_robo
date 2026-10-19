@@ -53,6 +53,12 @@ class AffineChoice(BaseModel):
     session_id: str
 
 
+class PixelProjection(BaseModel):
+    x_camera: float
+    y_camera: float
+    plan_z: float | None = None
+
+
 def _campaign(view: dict[str, Any] | None) -> dict[str, Any]:
     if view is None:
         raise HTTPException(status_code=404, detail="Nenhuma campanha ativa")
@@ -203,6 +209,22 @@ def create_app(config: dict[str, Any]) -> FastAPI:
         view = runtime.campaign.create(request.name, request.square_size_mm, request.pattern)
         assert view is not None
         return view
+
+    @app.get("/api/campaigns/{campaign_id}/projection")
+    def campaign_projection(campaign_id: str) -> dict[str, Any]:
+        try:
+            return runtime.campaign.projection_catalog(campaign_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Campanha não encontrada") from error
+
+    @app.post("/api/campaigns/{campaign_id}/projection")
+    def campaign_project_pixel(campaign_id: str, request: PixelProjection) -> dict[str, Any]:
+        try:
+            return runtime.campaign.project_pixel(
+                campaign_id, request.x_camera, request.y_camera, request.plan_z
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Campanha não encontrada") from error
 
     @app.post("/api/campaigns/{campaign_id}/open")
     def open_campaign(campaign_id: str) -> dict[str, Any]:

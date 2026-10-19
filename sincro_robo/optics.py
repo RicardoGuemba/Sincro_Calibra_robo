@@ -386,6 +386,25 @@ def _backproject_plane(
     return camera_origin + directions * depth.reshape(-1, 1)
 
 
+def robot_point_on_plane(
+    x_camera: float,
+    y_camera: float,
+    camera_matrix: list[list[float]],
+    dist_coeffs: list[float],
+    robot_from_camera_pose: dict[str, Any],
+    plane_z_mm: float,
+) -> tuple[float, float, float]:
+    """Pixel distorcido → ponto do robô na interseção do raio com o plano Z."""
+    point = _backproject_plane(
+        np.asarray([[x_camera, y_camera]], dtype=np.float64),
+        camera_matrix,
+        dist_coeffs,
+        robot_from_camera_pose,
+        plane_z_mm,
+    )[0]
+    return float(point[0]), float(point[1]), float(point[2])
+
+
 def diagnose_residuals(samples: list[dict[str, float]], xy_tolerance_mm: float) -> dict[str, Any]:
     """Lê o padrão espacial dos resíduos da afim, no formato do guia."""
     if len(samples) < 3:

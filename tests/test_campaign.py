@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from sincro_robo.api import create_app
+from sincro_robo.calibration import robot_geometric_center
 from sincro_robo.config import load_config
 from sincro_robo.domain import RobotPoseSnapshot, VisionObservation, utc_now
 from sincro_robo.optics import (
@@ -350,6 +351,27 @@ def test_full_wizard_reaches_the_mold_affine(campaign: CampaignController) -> No
     detail = capture.session_detail(session_id)
     assert detail["plans"][0]["evaluation"]["model"]["input_space"] == "undistorted_px_K_rect"
     assert detail["plans"][0]["evaluation"]["model"]["profile_sha256"] == view["profile_sha256"]
+    projected = campaign.project_pixel(campaign.active_id, 480.0, 270.0, 0.0)
+    center_x, center_y = robot_geometric_center(320.0, 210.0, 37.0, (0.0, 55.0))
+    assert projected["x_robo"] == pytest.approx(center_x, abs=1e-4)
+    assert projected["y_robo"] == pytest.approx(center_y, abs=1e-4)
+    assert "*u" in projected["relation"]["x_robo"]
+    assert "*v" in projected["relation"]["y_robo"]
+    assert len(projected["relation"]["x_coefficients"]) == 3
+    assert projected["plane_z_mm"] == 0.0
+    assert projected["optical_z_mm"] == pytest.approx(0.0, abs=1e-6)
+    same = campaign.project_pixel(campaign.active_id, 211.0, 130.0)
+    assert same["x_robo"] == pytest.approx(center_x, abs=1e-4)
+    assert same["y_robo"] == pytest.approx(center_y, abs=1e-4)
+    assert same["x_robo"] == pytest.approx(center_x, abs=1e-4)
+    assert same["x_robo"] == pytest.approx(center_x, abs=1e-4)
+
+
+def test_projection_requires_a_closed_optical_profile(campaign: CampaignController) -> None:
+    created = campaign.create("Sem perfil", 30.0)
+    assert created is not None
+    with pytest.raises(ValueError, match="intrínseca"):
+        campaign.project_pixel(created["id"], 10.0, 20.0, 0.0)
 
 
 def test_residual_stage_detects_the_board_instead_of_the_mold(campaign: CampaignController) -> None:
