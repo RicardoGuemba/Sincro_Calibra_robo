@@ -11,9 +11,11 @@ import cv2
 import numpy as np
 
 from ..calibration import fit_plan_calibration
+from ..projection import affine_relation, camera_to_robot
 from ..campaign_flow import BOARD_STAGES, STAGE_GUIDE, STAGES, coverage_view, gate_for, next_stage
 from ..domain import utc_now
 from ..optics import (
+    MIN_POSE_CHANGE_RATIO,
     PATTERN,
     VALIDATION_PLANES_MM,
     board_frame,
@@ -51,28 +53,50 @@ class CampaignController:
         self._lock = threading.RLock()
         self.active_id: str | None = None
         self.live_detection: dict[str, Any] | None = None
+        self._detection_ready = False
+        self._detected_frame_id: int | None = None
         self._scene = "mold"
         self._pose_override: tuple[float, float, float] | None = None
+        self._last_detected_jpeg: bytes | None = None
+        self._held_jpeg: bytes | None = None
         self._reset_focus_tracker()
 
     def camera_scene(self) -> str:
         with self._lock:
             return self._scene
 
+    def sync_scene(self) -> str:
+        """A cena segue a etapa gravada. Não depende de a página ter pedido o estado."""
+        campaign = self._current()
+        if campaign is None:
+            with self._lock:
+                self._scene = "mold"
+                self._pose_override = None
+            return "mold"
+        self._publish_simulation(campaign)
+        return self.camera_scene()
+
     def pose_override(self) -> tuple[float, float, float] | None:
         with self._lock:
             return self._pose_override
 
-    def create(self, name: str, square_size_mm: float) -> dict[str, Any]:
+    def create(
+        self, name: str, square_size_mm: float, pattern: list[int] | tuple[int, int] | None = None
+    ) -> dict[str, Any]:
         cleaned = name.strip()
         if not cleaned or len(cleaned) > 120:
             raise ValueError("Dê um nome de 1 a 120 caracteres para a campanha")
         if float(square_size_mm) <= 0:
             raise ValueError("O lado do quadrado precisa ser maior que zero")
+        if pattern is None:
+            pattern = self.config.get("calibration", {}).get("board_inner_corners") or PATTERN
+        corners = [int(value) for value in pattern]
+        if len(corners) != 2 or min(corners) < 3:
+            raise ValueError("Informe colunas e linhas de cantos internos, cada uma com pelo menos 3")
         state = {
             "stage": "fix_hardware",
             "square_size_mm": float(square_size_mm),
-            "pattern": list(PATTERN),
+            "pattern": corners,
             "checks": {
                 "camera_fixed": False,
                 "lens_focus_locked": False,
@@ -102,6 +126,69 @@ class CampaignController:
         self._reset_focus_tracker()
         self._publish_simulation(campaign)
         return self.view()
+
+    def summaries(self) -> list[dict[str, Any]]:
+        listed = []
+        for item in self.storage.list_campaign_summaries():
+            stage = str(item["stage"])
+            listed.append(
+                {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "created_at": item["created_at"],
+                    "stage": stage,
+                    "stage_title": STAGE_GUIDE.get(stage, {}).get("title", stage),
+                    "status": item["status"],
+                }
+            )
+        return listed
+
+    def resume(self, campaign_id: str) -> dict[str, Any]:
+        campaign = self.storage.get_campaign(campaign_id)
+        if campaign is None:
+            raise KeyError(campaign_id)
+        self._reset_focus_tracker()
+        lock = campaign["state"].get("focus_lock") or {}
+        if lock.get("peak"):
+            self._focus_peak = float(lock["peak"])
+        with self._lock:
+            self.active_id = campaign["id"]
+            self.live_detection = None
+            self._detected_frame_id = None
+            self._held_jpeg = None
+            self._last_detected_jpeg = None
+        session_id = campaign["state"].get("affine_session_id")
+        if session_id:
+            try:
+                self.capture.activate_session(session_id)
+            except KeyError:
+                pass
+        self.storage.audit(campaign["id"], "campaign_resumed", {"stage": campaign["stage"]})
+        if campaign.get("status") != "active":
+            self.storage.save_campaign_state(campaign["id"], campaign["stage"], campaign["state"], status="active")
+        view = self.view()
+        assert view is not None
+        return view
+
+    def resume_latest(self) -> dict[str, Any] | None:
+        for item in self.summaries():
+            if item["status"] == "active":
+                return self.resume(item["id"])
+        return None
+
+    def delete(self, campaign_id: str) -> None:
+        self.storage.delete_campaign(campaign_id)
+        with self._lock:
+            if self.active_id != campaign_id:
+                return
+            self.active_id = None
+            self.live_detection = None
+            self._detected_frame_id = None
+            self._held_jpeg = None
+            self._last_detected_jpeg = None
+            self._scene = "mold"
+            self._pose_override = None
+        self._reset_focus_tracker()
 
     def set_checks(self, checks: dict[str, bool]) -> dict[str, Any]:
         campaign = self._require()
@@ -181,12 +268,140 @@ class CampaignController:
             self._freeze_profile(campaign)
         campaign["stage"] = coming
         campaign["state"]["stage"] = coming
+        with self._lock:
+            self._held_jpeg = None
         self._save(campaign)
         self.storage.audit(campaign["id"], "campaign_advanced", {"stage": coming})
         return self.view()
 
+    def retreat(self) -> dict[str, Any]:
+        campaign = self._require()
+        index = STAGES.index(campaign["stage"])
+        if index == 0:
+            raise ValueError("A campanha já está na primeira etapa")
+        previous = STAGES[index - 1]
+        campaign["stage"] = previous
+        campaign["state"]["stage"] = previous
+        campaign["state"].pop("ransac", None)
+        with self._lock:
+            self._held_jpeg = None
+        self._save(campaign)
+        self.storage.audit(campaign["id"], "campaign_retreated", {"stage": previous})
+        return self.view()
+
+    def finish(self) -> dict[str, Any]:
+        campaign = self._require()
+        self._require_stage(campaign, "analyze_residuals")
+        self.storage.save_campaign_state(
+            campaign["id"], campaign["stage"], campaign["state"], status="closed"
+        )
+        with self._lock:
+            self.active_id = None
+            self.live_detection = None
+            self._detected_frame_id = None
+            self._held_jpeg = None
+            self._last_detected_jpeg = None
+            self._scene = "mold"
+            self._pose_override = None
+        self._reset_focus_tracker()
+        self.storage.audit(campaign["id"], "campaign_finished", {"stage": campaign["stage"]})
+        return {"id": campaign["id"], "closed": True, "status": "closed"}
+
+    def projection_catalog(self, campaign_id: str) -> dict[str, Any]:
+        campaign, _profile, detail = self._projection_context(campaign_id)
+        planes = [self._projection_plane(plan) for plan in detail["plans"]]
+        return {
+            "campaign_id": campaign["id"],
+            "campaign_name": campaign["name"],
+            "profile_sha256": campaign["state"].get("profile_sha256"),
+            "planes": planes,
+        }
+
+    def project_pixel(
+        self,
+        campaign_id: str,
+        x_camera: float,
+        y_camera: float,
+        plan_z: float | None = None,
+    ) -> dict[str, Any]:
+        campaign, profile, detail = self._projection_context(campaign_id)
+        plan = self._projection_plan_choice(detail["plans"], plan_z)
+        model = plan["evaluation"]["model"]
+        intrinsic = profile["intrinsic"]
+        extrinsic = profile["extrinsic"]
+        projected = camera_to_robot(
+            float(x_camera),
+            float(y_camera),
+            camera_matrix=intrinsic["camera_matrix"],
+            dist_coeffs=intrinsic["dist_coeffs"],
+            rectified_camera_matrix=intrinsic["rectified_camera_matrix"],
+            robot_from_camera=extrinsic["robot_from_camera"],
+            plane_z_mm=float(plan["z"]),
+            affine=model["affine"],
+        )
+        result = {
+            "campaign_id": campaign["id"],
+            "campaign_name": campaign["name"],
+            "profile_sha256": campaign["state"].get("profile_sha256"),
+            **projected,
+        }
+        return result
+
+    def _projection_context(self, campaign_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        campaign = self.storage.get_campaign(campaign_id)
+        if campaign is None:
+            raise KeyError(campaign_id)
+        profile = campaign["state"].get("profile") or {}
+        intrinsic = profile.get("intrinsic") or {}
+        extrinsic = profile.get("extrinsic") or {}
+        if not intrinsic.get("camera_matrix") or not extrinsic.get("robot_from_camera"):
+            raise ValueError("A campanha ainda não fechou a intrínseca e a extrínseca.")
+        session_id = campaign["state"].get("affine_session_id")
+        if not session_id:
+            raise ValueError("Esta campanha não tem coleta de molde ligada.")
+        try:
+            detail = self.capture.session_detail(session_id)
+        except KeyError as error:
+            raise ValueError("A coleta de molde ligada a esta campanha não existe mais.") from error
+        return campaign, profile, detail
+
+    @staticmethod
+    def _projection_plane(plan: dict[str, Any]) -> dict[str, Any]:
+        evaluation = plan["evaluation"]
+        model = evaluation.get("model") or {}
+        ready = bool(evaluation.get("ready")) and model.get("input_space") == "undistorted_px_K_rect"
+        item: dict[str, Any] = {
+            "z": float(plan["z"]),
+            "ready": ready,
+            "reason": None if ready else evaluation.get("reason") or "A afim deste plano ainda não está no pixel retificado.",
+        }
+        if ready:
+            item["relation"] = affine_relation(model["affine"])
+        return item
+
+    def _projection_plan_choice(self, plans: list[dict[str, Any]], plan_z: float | None) -> dict[str, Any]:
+        described = [self._projection_plane(plan) for plan in plans]
+        ready = [item for item in described if item["ready"]]
+        if plan_z is None:
+            if len(ready) == 1:
+                plan_z = float(ready[0]["z"])
+            elif not ready:
+                raise ValueError("Nenhum plano desta campanha tem afim pronta.")
+            else:
+                heights = ", ".join(f"{item['z']:g}" for item in ready)
+                raise ValueError(f"Escolha o plano Z. Há afim pronta em {heights} mm.")
+        chosen = next((plan for plan in plans if abs(float(plan["z"]) - float(plan_z)) < 1e-6), None)
+        if chosen is None:
+            raise ValueError("Este plano não faz parte da coleta de molde.")
+        described_choice = self._projection_plane(chosen)
+        if not described_choice["ready"]:
+            raise ValueError(str(described_choice["reason"]))
+        return chosen
+
     def observe_frame(self, frame_bgr: np.ndarray) -> dict[str, Any] | None:
-        scene = self.camera_scene()
+        self._detection_ready = False
+        self._detected_frame_id = None
+        scene = self.sync_scene()
         if scene not in {"board", "undistort", "focus"}:
             with self._lock:
                 self.live_detection = None
@@ -196,16 +411,17 @@ class CampaignController:
         detection = detect_chessboard(frame_bgr, pattern)  # type: ignore[arg-type]
         with self._lock:
             self.live_detection = detection
+            self._detected_frame_id = id(frame_bgr)
+            self._detection_ready = True
         if campaign is not None:
             self._update_focus(campaign, frame_bgr, detection)
         return detection
 
     def preview_frame(self, frame_bgr: np.ndarray) -> np.ndarray | None:
-        scene = self.camera_scene()
+        scene = self.sync_scene()
         if scene == "mold":
             return None
         campaign = self._current()
-        detection = self.live_detection
         if scene == "undistort" and campaign and campaign["state"].get("intrinsic"):
             intrinsic = campaign["state"]["intrinsic"]
             preview = preview_before_after(
@@ -214,8 +430,13 @@ class CampaignController:
                 np.asarray(intrinsic["dist_coeffs"], dtype=np.float64),
             )
             return preview
-        if detection is None:
-            detection = {"found": False, "corners": []}
+        if self._detected_frame_id != id(frame_bgr):
+            self.observe_frame(frame_bgr)
+            scene = self.camera_scene()
+            if scene == "mold":
+                return None
+            campaign = self._current()
+        detection = self.live_detection or {"found": False, "corners": []}
         pattern = tuple(campaign["state"]["pattern"]) if campaign else PATTERN
         annotated = draw_detection(frame_bgr, detection, pattern)  # type: ignore[arg-type]
         if scene == "focus":
@@ -329,6 +550,45 @@ class CampaignController:
         self._save(campaign)
         return self.view()
 
+    def remember_detected_preview(self, jpeg: bytes | None) -> None:
+        if not jpeg:
+            return
+        with self._lock:
+            if self._held_jpeg is not None:
+                return
+            detection = self.live_detection
+            if detection and detection.get("found"):
+                self._last_detected_jpeg = jpeg
+
+    def held_preview(self) -> bytes | None:
+        with self._lock:
+            return self._held_jpeg
+
+    def freeze_preview(self) -> dict[str, Any]:
+        campaign = self._require()
+        if campaign["stage"] not in {"teach_frame", "confirm_direction"}:
+            raise ValueError("Esta etapa não congela a imagem")
+        with self._lock:
+            jpeg = self._last_detected_jpeg
+            if not jpeg:
+                raise ValueError("Mostre o tabuleiro detectado, com a origem vermelha, antes de congelar.")
+            self._held_jpeg = jpeg
+        self.storage.audit(campaign["id"], "frame_frozen", {})
+        view = self.view()
+        assert view is not None
+        return view
+
+    def release_preview(self) -> dict[str, Any]:
+        campaign = self._require()
+        if campaign["stage"] not in {"teach_frame", "confirm_direction"}:
+            raise ValueError("Esta etapa não congela a imagem")
+        with self._lock:
+            self._held_jpeg = None
+        self.storage.audit(campaign["id"], "frame_released", {})
+        view = self.view()
+        assert view is not None
+        return view
+
     def record_frame_point(self, role: str, robot: dict[str, float] | None = None) -> dict[str, Any]:
         if role not in {"origin", "plus_x", "plus_y"}:
             raise ValueError("O ponto do referencial deve ser origem, +X ou +Y")
@@ -403,20 +663,33 @@ class CampaignController:
     def select_validation_plane(self, plan_z: float) -> dict[str, Any]:
         campaign = self._require()
         self._require_stage(campaign, "validate_planes")
-        if not any(abs(float(plan_z) - plane) < 1e-6 for plane in VALIDATION_PLANES_MM):
-            raise ValueError("A validação usa os planos 0, 200 e 400 mm")
-        campaign["state"]["validation_plan_z"] = float(plan_z)
+        value = float(plan_z)
+        if not any(abs(value - plane) < 1e-6 for plane in VALIDATION_PLANES_MM):
+            raise ValueError("Escolha 0, 200 ou 400 mm")
+        campaign["state"]["validation_plan_z"] = value
         self._save(campaign)
         return self.view()
 
     def open_affine_session(self, name: str | None = None) -> dict[str, Any]:
         campaign = self._require()
         self._require_stage(campaign, "affine_mold")
+        planes = [float(value) for value in self.config["calibration"]["default_planes_mm"]]
+        session = self.capture.create_session(name or f"{campaign['name']} · molde", planes)
+        return self._link_affine_session(campaign, session["id"])
+
+    def use_affine_session(self, session_id: str) -> dict[str, Any]:
+        campaign = self._require()
+        self._require_stage(campaign, "affine_mold")
+        if not str(session_id or "").strip():
+            raise ValueError("Escolha uma coleta já feita")
+        if self.storage.get_session(session_id) is None:
+            raise KeyError(session_id)
+        return self._link_affine_session(campaign, session_id)
+
+    def _link_affine_session(self, campaign: dict[str, Any], session_id: str) -> dict[str, Any]:
         profile = campaign["state"].get("profile")
         if not profile or not campaign["state"].get("profile_sha256"):
             raise ValueError("O perfil óptico ainda não foi fechado")
-        planes = [float(value) for value in self.config["calibration"]["default_planes_mm"]]
-        session = self.capture.create_session(name or f"{campaign['name']} · molde", planes)
         optical = {
             "profile_id": campaign["id"],
             "profile_sha256": campaign["state"]["profile_sha256"],
@@ -428,10 +701,10 @@ class CampaignController:
                 "rectified_camera_matrix": profile["intrinsic"]["rectified_camera_matrix"],
             },
         }
-        self.storage.merge_session_config(session["id"], {"optical_profile": optical})
+        self.storage.merge_session_config(session_id, {"optical_profile": optical})
         self.storage.mark_profiles_stale(campaign["state"]["profile_sha256"])
-        self.capture.activate_session(session["id"])
-        campaign["state"]["affine_session_id"] = session["id"]
+        self.capture.activate_session(session_id)
+        campaign["state"]["affine_session_id"] = session_id
         self._save(campaign)
         return self.view()
 
@@ -515,6 +788,7 @@ class CampaignController:
             "accepted_count": len(accepted),
             "coverage": coverage_view(campaign["captures"]),
             "detection": live,
+            "frame_frozen": self.held_preview() is not None,
             "reprojection": {
                 "rms_px": intrinsic.get("rms_px"),
                 "images": images,
@@ -529,12 +803,37 @@ class CampaignController:
             "validation_plan_z": campaign["state"].get("validation_plan_z"),
             "validation": self._validation_summary(campaign),
             "affine_session_id": campaign["state"].get("affine_session_id"),
+            "affine_session_name": self._affine_session_name(campaign),
             "profile_sha256": campaign["state"].get("profile_sha256"),
             "diagnosis": self._diagnosis(campaign) if stage == "analyze_residuals" else None,
+            "summary": self._summary(campaign) if stage == "analyze_residuals" else None,
             "extrinsic_ready": bool(campaign["state"].get("extrinsic")),
             "image_size_px": campaign["state"].get("image_size_px"),
             "focus": self.focus_view(),
         }
+
+    def _reject_repeated_pose(
+        self, campaign: dict[str, Any], corners: list[list[float]], size: list[int]
+    ) -> None:
+        # Repeated views add nothing to K and only inflate the accepted count.
+        cols, rows = (int(value) for value in campaign["state"]["pattern"])
+        points = np.asarray(corners, dtype=np.float64).reshape(rows, cols, 2)
+        # OpenCV may return the same view starting from another symmetric corner.
+        orderings = [points, points[::-1, ::-1]]
+        if cols == rows:
+            orderings += [np.rot90(points, 1), np.rot90(points, 3)]
+        limit = MIN_POSE_CHANGE_RATIO * float(np.hypot(size[0], size[1]))
+        for item in self._accepted(campaign, "capture_intrinsic"):
+            previous = np.asarray(item.get("corners") or [], dtype=np.float64)
+            if previous.size != points.size:
+                continue
+            previous = previous.reshape(rows, cols, 2)
+            shift = min(float(np.linalg.norm(view - previous, axis=2).mean()) for view in orderings)
+            if shift < limit:
+                raise ValueError(
+                    "Esta pose é praticamente igual a uma imagem já aceita. "
+                    "Mova ou incline o tabuleiro antes de aceitar outra."
+                )
 
     def _store_capture(
         self,
@@ -556,6 +855,8 @@ class CampaignController:
         if decision == "accepted":
             if known and list(known) != size:
                 raise ValueError("A resolução mudou. O perfil só vale para o raster da primeira captura.")
+            if campaign["stage"] == "capture_intrinsic":
+                self._reject_repeated_pose(campaign, corners, size)
             campaign["state"]["image_size_px"] = size
         if campaign["stage"] == "solve_extrinsic" and decision == "accepted":
             for item in self._accepted(campaign, "solve_extrinsic"):
@@ -648,12 +949,14 @@ class CampaignController:
     def _publish_simulation(self, campaign: dict[str, Any]) -> None:
         stage = campaign["stage"]
         scene = "mold"
+        # O molde, visto pelo RF-DETR, só entra na afim. A análise dos resíduos
+        # ainda mostra o tabuleiro; senão o xadrez é segmentado como embalagem.
         if stage == "fix_hardware":
             scene = "focus"
-        elif stage in BOARD_STAGES and stage != "confirm_undistort":
-            scene = "board"
         elif stage == "confirm_undistort":
             scene = "undistort"
+        elif stage in BOARD_STAGES or stage in {"teach_frame", "confirm_direction", "analyze_residuals"}:
+            scene = "board"
         override = self._simulation_pose(campaign)
         with self._lock:
             self._scene = scene
@@ -717,6 +1020,52 @@ class CampaignController:
             diagnosis["ransac_available"] = False
         return diagnosis
 
+    def _summary(self, campaign: dict[str, Any]) -> dict[str, Any]:
+        intrinsic = campaign["state"].get("intrinsic") or {}
+        direction = campaign["state"].get("direction_check") or {}
+        accepted = [
+            item for item in campaign["captures"]
+            if item["decision"] == "accepted" and item["stage"] == "capture_intrinsic"
+        ]
+        affine_planes: list[dict[str, Any]] = []
+        session_id = campaign["state"].get("affine_session_id")
+        if session_id:
+            try:
+                detail = self.capture.session_detail(session_id)
+            except KeyError:
+                detail = None
+            if detail:
+                for plan in detail["plans"]:
+                    evaluation = plan["evaluation"]
+                    metrics = evaluation.get("metrics") or {}
+                    xy = metrics.get("xy_mm") or {}
+                    angle = metrics.get("angle_deg") or {}
+                    affine_planes.append(
+                        {
+                            "z": float(plan["z"]),
+                            "points": int(plan["count"]),
+                            "ready": bool(evaluation.get("ready")),
+                            "rms_mm": xy.get("rms"),
+                            "max_mm": xy.get("max"),
+                            "angle_rms_deg": angle.get("rms"),
+                            "passed": bool(metrics.get("passed")),
+                        }
+                    )
+        return {
+            "square_size_mm": campaign["state"].get("square_size_mm"),
+            "pattern": campaign["state"].get("pattern"),
+            "accepted_images": len(accepted),
+            "reprojection_rms_px": intrinsic.get("rms_px"),
+            "image_size_px": campaign["state"].get("image_size_px"),
+            "direction_correct_mm": direction.get("error_correct_mm"),
+            "direction_inverted_mm": direction.get("error_inverted_mm"),
+            "validation": self._validation_summary(campaign),
+            "affine_planes": affine_planes,
+            "tcp_local_mm": list(self.config["calibration"]["pick_offset_local_mm"]),
+            "affine_session_name": self._affine_session_name(campaign),
+            "profile_sha256": campaign["state"].get("profile_sha256"),
+        }
+
     @staticmethod
     def _pair_residual(evaluation: dict[str, Any], pair_id: str) -> float | None:
         for item in evaluation.get("metrics", {}).get("pairs", []):
@@ -724,20 +1073,31 @@ class CampaignController:
                 return float(item["residual_xy_mm"])
         return None
 
-    def _validation_summary(self, campaign: dict[str, Any]) -> dict[str, Any]:
-        summary: dict[str, Any] = {}
-        for plane in VALIDATION_PLANES_MM:
-            rows = [
-                item for item in campaign["captures"]
-                if item["stage"] == "validate_planes" and item["decision"] == "accepted" and item.get("metrics")
-                and abs(float(item.get("plan_z") or -1) - plane) < 1e-6
-            ]
-            if not rows:
-                summary[f"{plane:.0f}"] = None
+    def _validation_summary(self, campaign: dict[str, Any]) -> list[dict[str, Any]]:
+        grouped: dict[float, list[dict[str, Any]]] = {}
+        for item in campaign["captures"]:
+            if item["stage"] != "validate_planes" or item["decision"] != "accepted" or not item.get("metrics"):
                 continue
+            if item.get("plan_z") is None:
+                continue
+            height = round(float(item["plan_z"]), 3)
+            grouped.setdefault(height, []).append(item)
+        summary = []
+        for height, rows in sorted(grouped.items()):
             mm = rows[-1]["metrics"]["millimetres"]
-            summary[f"{plane:.0f}"] = {"mae": mm["mae"], "rmse": mm["rmse"], "max": mm["max"], "count": len(rows)}
+            summary.append(
+                {"z": height, "mae": mm["mae"], "rmse": mm["rmse"], "max": mm["max"], "count": len(rows)}
+            )
         return summary
+
+    def _affine_session_name(self, campaign: dict[str, Any]) -> str | None:
+        session_id = campaign["state"].get("affine_session_id")
+        if not session_id:
+            return None
+        session = self.storage.get_session(session_id)
+        if session is None:
+            return None
+        return str(session["name"])
 
     def _snapshot(self, campaign: dict[str, Any]) -> dict[str, Any]:
         affine_ready = False
@@ -752,6 +1112,7 @@ class CampaignController:
             "stage": campaign["stage"],
             "checks": campaign["state"].get("checks") or {},
             "square_size_mm": campaign["state"].get("square_size_mm"),
+            "pattern": campaign["state"].get("pattern"),
             "captures": campaign["captures"],
             "intrinsic": campaign["state"].get("intrinsic"),
             "reprojection_reviewed": campaign["state"].get("reprojection_reviewed"),
@@ -842,6 +1203,16 @@ class CampaignController:
         self._focus_peak = float(assessed["peak"])
         self._focus_current = assessed["current"]
         self._focus_board = True
+        # A nitidez cai de propósito quando o tabuleiro muda de altura. Só o passo
+        # do anel trata isso como foco destravado.
+        if campaign["stage"] != "fix_hardware":
+            self._focus_below = 0
+            if campaign["state"].get("focus_drift"):
+                latest = self.storage.get_campaign(campaign["id"])
+                if latest is not None and latest["state"].get("focus_drift"):
+                    latest["state"]["focus_drift"] = False
+                    self._save(latest)
+            return
         if assessed["soft"]:
             self._focus_below += 1
         else:
@@ -853,7 +1224,11 @@ class CampaignController:
     def focus_view(self) -> dict[str, Any]:
         campaign = self._current()
         lock = (campaign or {}).get("state", {}).get("focus_lock") if campaign else None
-        drift = bool(campaign and campaign["state"].get("focus_drift"))
+        drift = bool(
+            campaign
+            and campaign["stage"] == "fix_hardware"
+            and campaign["state"].get("focus_drift")
+        )
         assessed = assess_focus(self._focus_samples, self._focus_peak, (lock or {}).get("peak"))
         locked_peak = None if not lock else lock.get("peak")
         if drift:
@@ -879,14 +1254,24 @@ class CampaignController:
         }
 
     def _require_focus_held(self, campaign: dict[str, Any]) -> None:
-        if campaign["state"].get("focus_drift"):
+        if campaign["stage"] == "fix_hardware" and campaign["state"].get("focus_drift"):
             raise ValueError("O foco caiu em relação ao valor travado. Recomece a campanha.")
 
     def encode_preview(self, frame_bgr: np.ndarray) -> bytes | None:
         preview = self.preview_frame(frame_bgr)
         if preview is None:
             return None
-        ok, encoded = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 86])
-        if not ok:
-            return None
-        return encoded.tobytes()
+        jpeg = _encode_jpeg(preview)
+        self.remember_detected_preview(jpeg)
+        return jpeg
+
+    def encode_board_fallback(self, frame_bgr: np.ndarray) -> bytes | None:
+        """Prévia mínima quando o desenho do tabuleiro falha. Não usa o molde."""
+        return _encode_jpeg(draw_detection(frame_bgr, {"found": False, "corners": []}))
+
+
+def _encode_jpeg(image: np.ndarray) -> bytes | None:
+    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 86])
+    if not ok:
+        return None
+    return encoded.tobytes()

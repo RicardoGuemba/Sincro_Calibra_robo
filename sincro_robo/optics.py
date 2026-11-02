@@ -15,6 +15,7 @@ import numpy as np
 
 PATTERN = (9, 6)
 MIN_ACCEPTED = 20
+MIN_POSE_CHANGE_RATIO = 0.015
 REPROJECTION_LIMIT_PX = 1.0
 MIN_FRAME_AREA_MM2 = 500.0
 VALIDATION_PLANES_MM = (0.0, 200.0, 400.0)
@@ -250,7 +251,7 @@ def solve_extrinsic(
     obj = object_points(pattern, square_size_mm)
     image = np.asarray(corners, dtype=np.float64).reshape(-1, 1, 2)
     if image.shape[0] != obj.shape[0]:
-        raise ValueError("A imagem extrínseca não tem os 54 cantos")
+        raise ValueError(f"A imagem extrínseca não tem os {obj.shape[0]} cantos")
     ok, rvec, tvec = cv2.solvePnP(
         obj,
         image,
@@ -347,7 +348,7 @@ def validation_metrics(
     observed = np.asarray(detected_corners, dtype=np.float64).reshape(-1, 2)
     predicted = np.asarray(projected, dtype=np.float64).reshape(-1, 2)
     if observed.shape != predicted.shape:
-        raise ValueError("A validação precisa dos mesmos 54 cantos, em imagens novas")
+        raise ValueError(f"A validação precisa dos mesmos {obj.shape[0]} cantos, em imagens novas")
     pixel_errors = np.linalg.norm(observed - predicted, axis=1)
     back = _backproject_plane(
         observed, camera_matrix, dist_coeffs, robot_from_camera_pose, float(plane_z_mm)
@@ -383,6 +384,25 @@ def _backproject_plane(
     safe = np.where(np.abs(dz) < 1e-9, 1e-9, dz)
     depth = (float(plane_z_mm) - camera_origin[2]) / safe
     return camera_origin + directions * depth.reshape(-1, 1)
+
+
+def robot_point_on_plane(
+    x_camera: float,
+    y_camera: float,
+    camera_matrix: list[list[float]],
+    dist_coeffs: list[float],
+    robot_from_camera_pose: dict[str, Any],
+    plane_z_mm: float,
+) -> tuple[float, float, float]:
+    """Pixel distorcido → ponto do robô na interseção do raio com o plano Z."""
+    point = _backproject_plane(
+        np.asarray([[x_camera, y_camera]], dtype=np.float64),
+        camera_matrix,
+        dist_coeffs,
+        robot_from_camera_pose,
+        plane_z_mm,
+    )[0]
+    return float(point[0]), float(point[1]), float(point[2])
 
 
 def diagnose_residuals(samples: list[dict[str, float]], xy_tolerance_mm: float) -> dict[str, Any]:

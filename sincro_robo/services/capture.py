@@ -29,6 +29,16 @@ POINT_REGIONS = (
     ("Expansão inferior", "adjustment", (0.50, 0.86)),
 )
 
+# Desvios de qualidade. Orientam o operador e nunca impedem gravar o ponto.
+VISION_ADVICE = {
+    "single_instance": "Há mais de uma instância. O recomendado é deixar só o molde.",
+    "confidence": "A confiança está abaixo do recomendado.",
+    "mask_not_cut": "A máscara encosta na borda da imagem.",
+    "axis_quality": "O eixo está menos confiável do que o recomendado.",
+    "mask_area": "A área da máscara está fora da faixa recomendada.",
+    "vcp_scale": "A escala VCPn não pôde ser calculada.",
+}
+
 
 def sha256_file(path: str | Path) -> str:
     file_path = Path(path)
@@ -72,6 +82,8 @@ class CaptureController:
         self.active_session_id: str | None = None
         self.active_plan_z: float | None = None
         self._candidate: CaptureCandidate | None = None
+        self._held_vision: VisionObservation | None = None
+        self._held_jpeg: bytes | None = None
         self._lock = threading.RLock()
         self.model_hash = sha256_file(config["model"]["checkpoint"])
         self.revision = git_revision(project_root)
@@ -122,6 +134,8 @@ class CaptureController:
             self.active_session_id = session_id
             self.active_plan_z = None
             self._candidate = None
+            self._held_vision = None
+            self._held_jpeg = None
         return self.session_detail(session_id)
 
     def activate_plan(self, session_id: str, plan_z: float) -> dict[str, Any]:
@@ -136,20 +150,45 @@ class CaptureController:
         with self._lock:
             self.active_plan_z = value
             self._candidate = None
+            self._held_vision = None
+            self._held_jpeg = None
         self.storage.audit(session_id, "plan_activated", {"plan_z": value})
         return self.session_detail(session_id)
 
     def _next_point(self, session_id: str, plan_z: float) -> tuple[int, str, str, tuple[float, float]]:
-        count = len(self.storage.list_pairs(session_id, plan_z))
-        index = count + 1
-        if index > len(POINT_REGIONS):
-            raise ValueError("O plano já atingiu o máximo de 9 pontos")
+        index = self._open_point_index(session_id, plan_z)
+        if index is None:
+            taken = {int(pair["point_index"]) for pair in self.storage.list_pairs(session_id, plan_z)}
+            extra = (max(taken) if taken else len(POINT_REGIONS)) + 1
+            return extra, "Extra", "adjustment", (0.50, 0.50)
         region, role, target = POINT_REGIONS[index - 1]
         return index, region, role, target
 
-    def _check_duplicate(
+    def _open_point_index(self, session_id: str, plan_z: float) -> int | None:
+        taken = {int(pair["point_index"]) for pair in self.storage.list_pairs(session_id, plan_z)}
+        for index in range(1, len(POINT_REGIONS) + 1):
+            if index not in taken:
+                return index
+        return None
+
+    def remove_point(self, session_id: str, pair_id: str) -> dict[str, Any]:
+        pair = next((item for item in self.storage.list_pairs(session_id) if item["id"] == pair_id), None)
+        if pair is None:
+            raise KeyError(pair_id)
+        self.storage.delete_pair(pair_id)
+        with self._lock:
+            if self._candidate is not None and self._candidate.session_id == session_id:
+                self._candidate = None
+        self.storage.audit(
+            session_id,
+            "point_removed",
+            {"pair_id": pair_id, "plan_z": pair["plan_z"], "point": pair["point_index"]},
+        )
+        return self.session_detail(session_id)
+
+    def _is_duplicate(
         self, session_id: str, plan_z: float, observation: VisionObservation
-    ) -> None:
+    ) -> bool:
         calibration = self.config["calibration"]
         for pair in self.storage.list_pairs(session_id, plan_z):
             vision = pair["vision"]
@@ -159,27 +198,91 @@ class CaptureController:
                 distance < calibration["duplicate_distance_px"]
                 and angle < calibration["duplicate_angle_deg"]
             ):
-                raise ValueError("Ponto duplicado: mova o molde para a região sugerida")
+                return True
+        return False
 
-    def _is_duplicate(
-        self, session_id: str, plan_z: float, observation: VisionObservation
-    ) -> bool:
-        try:
-            self._check_duplicate(session_id, plan_z, observation)
-            return False
-        except ValueError:
-            return True
+    def _recording_context(
+        self,
+        session_id: str,
+        plan_z: float,
+        vision: VisionObservation,
+        robot: RobotPoseSnapshot | None,
+    ) -> dict[str, Any]:
+        """Monta o próximo ponto e a lista de desvios. Nada aqui recusa a gravação."""
+        point_index, region, role, target = self._next_point(session_id, plan_z)
+        extra = point_index > len(POINT_REGIONS)
+        in_region = True
+        if not extra:
+            normalized_x = vision.x / max(1.0, float(vision.frame_width))
+            normalized_y = vision.y / max(1.0, float(vision.frame_height))
+            radius = float(self.config["calibration"]["target_region_radius_norm"])
+            in_region = math.hypot(normalized_x - target[0], normalized_y - target[1]) <= radius
+        duplicate = self._is_duplicate(session_id, plan_z, vision)
+        warnings: list[str] = [
+            message for key, message in VISION_ADVICE.items() if vision.gates.get(key) is False
+        ]
+        if not vision.stable:
+            warnings.append("A visão ainda oscila.")
+        if extra:
+            warnings.append(
+                "Os 9 pontos sugeridos deste plano já foram gravados. Este entra como ponto extra."
+            )
+        elif not in_region:
+            warnings.append("O molde está fora da região sugerida para este ponto.")
+        if duplicate:
+            warnings.append("Este ponto parece repetir outro já gravado neste plano.")
+        if robot is not None and not robot.fresh:
+            warnings.append("A pose do robô não é recente.")
+        if robot is not None:
+            plan_warning = self._plan_warning(robot, plan_z)
+            if plan_warning:
+                warnings.append(plan_warning)
+        return {
+            "point_index": point_index,
+            "region": region,
+            "role": role,
+            "in_region": in_region and not extra,
+            "extra": extra,
+            "duplicate": duplicate,
+            "warnings": warnings,
+        }
+
+    def held_vision(self) -> VisionObservation | None:
+        with self._lock:
+            return self._held_vision
+
+    def held_jpeg(self) -> bytes | None:
+        with self._lock:
+            return self._held_jpeg
+
+    def release_vision(self) -> None:
+        with self._lock:
+            self._held_vision = None
+            self._held_jpeg = None
+
+    def _plan_warning(self, robot: RobotPoseSnapshot, plan_z: float) -> str | None:
+        tolerance = float(self.config["calibration"]["plan_z_tolerance_mm"])
+        if abs(robot.z - plan_z) <= tolerance:
+            return None
+        return (
+            f"Z do robô ({robot.z:.1f} mm) difere do plano ({plan_z:.1f} ± {tolerance:.0f} mm). "
+            "O ponto pode ser registrado mesmo assim."
+        )
 
     def capture_readiness(self) -> dict[str, Any]:
         with self._lock:
             session_id = self.active_session_id
             plan_z = self.active_plan_z
             candidate_pending = self._candidate is not None
-        vision = self.vision_supplier()
+            held = self._held_vision
+        live = self.vision_supplier()
+        vision = held or live
         robot = self.robot_supplier()
         result: dict[str, Any] = {
             "session": session_id is not None,
             "plan": plan_z is not None,
+            "vision_present": vision is not None,
+            "pose_present": robot is not None,
             "single_instance": bool(vision and vision.gates.get("single_instance")),
             "confidence": bool(vision and vision.gates.get("confidence")),
             "mask_not_cut": bool(vision and vision.gates.get("mask_not_cut")),
@@ -190,34 +293,65 @@ class CaptureController:
             "pose": bool(robot and robot.fresh),
             "region": False,
             "plan_z": False,
+            "plan_z_warning": None,
             "not_duplicate": False,
             "candidate_clear": not candidate_pending,
+            "vision_frozen": held is not None,
+            "advice": [],
+            "can_freeze": False,
+            "can_register": False,
+            "ready": False,
         }
-        if session_id is None or plan_z is None or vision is None:
-            result["ready"] = False
-            return result
-        try:
-            _index, _region, _role, target = self._next_point(session_id, plan_z)
-        except ValueError:
-            result["ready"] = False
-            return result
-        normalized_x = vision.x / max(1.0, float(vision.frame_width))
-        normalized_y = vision.y / max(1.0, float(vision.frame_height))
-        radius = float(self.config["calibration"]["target_region_radius_norm"])
-        result["region"] = math.hypot(normalized_x - target[0], normalized_y - target[1]) <= radius
-        result["not_duplicate"] = not self._is_duplicate(session_id, plan_z, vision)
-        if robot is not None:
-            tolerance = float(self.config["calibration"]["plan_z_tolerance_mm"])
-            result["plan_z"] = abs(robot.z - plan_z) <= tolerance
-        result["ready"] = all(
-            result[key]
-            for key in (
-                "session", "plan", "single_instance", "confidence", "mask_not_cut",
-                "axis_quality", "mask_area", "vcp_scale", "stable", "pose", "region",
-                "plan_z", "not_duplicate", "candidate_clear",
-            )
+        if session_id is not None and plan_z is not None and vision is not None:
+            context = self._recording_context(session_id, plan_z, vision, robot)
+            result["region"] = context["in_region"]
+            result["not_duplicate"] = not context["duplicate"]
+            result["advice"] = list(context["warnings"])
+            plan_notes = [item for item in context["warnings"] if item.startswith("Z do robô")]
+            if plan_notes:
+                result["plan_z_warning"] = plan_notes[0]
+                result["plan_z"] = False
+            elif robot is not None:
+                result["plan_z"] = True
+        elif robot is not None and plan_z is not None:
+            warning = self._plan_warning(robot, plan_z)
+            result["plan_z"] = warning is None
+            result["plan_z_warning"] = warning
+            if warning:
+                result["advice"] = [warning]
+        result["can_freeze"] = (
+            session_id is not None
+            and plan_z is not None
+            and live is not None
+            and held is None
+            and not candidate_pending
         )
+        result["can_register"] = (
+            held is not None
+            and session_id is not None
+            and plan_z is not None
+            and robot is not None
+            and not candidate_pending
+        )
+        result["ready"] = result["can_freeze"] or result["can_register"]
         return result
+
+    def freeze_vision(self, jpeg: bytes | None) -> dict[str, Any]:
+        if self.held_vision() is not None:
+            raise ValueError("A imagem já está congelada")
+        if not jpeg:
+            raise ValueError("Ainda não há imagem para congelar")
+        vision = self.vision_supplier()
+        if vision is None:
+            raise ValueError("Ainda não há molde na imagem para congelar")
+        with self._lock:
+            session_id = self.active_session_id
+            plan_z = self.active_plan_z
+            self._held_vision = vision
+            self._held_jpeg = jpeg
+        if session_id is not None:
+            self.storage.audit(session_id, "vision_frozen", {"plan_z": plan_z})
+        return {"frozen": True}
 
     def capture(self) -> CaptureCandidate:
         with self._lock:
@@ -225,46 +359,34 @@ class CaptureController:
                 raise ValueError("Já existe um candidato aguardando confirmação")
             session_id = self.active_session_id
             plan_z = self.active_plan_z
+            held = self._held_vision
         if session_id is None or plan_z is None:
             raise ValueError("Ative uma sessão e um plano Z antes da captura")
-        vision = self.vision_supplier()
+        vision = held if held is not None else self.vision_supplier()
         robot = self.robot_supplier()
         if vision is None:
-            raise ValueError("Visão indisponível")
-        if not all(vision.gates.values()) or not vision.stable:
-            raise ValueError("A visão ainda não está estável ou não passou nos gates")
-        if robot is None or not robot.fresh:
-            raise ValueError("Pose do robô indisponível ou desatualizada")
-        self._check_duplicate(session_id, plan_z, vision)
-        _point_index, _region, _role, target = self._next_point(session_id, plan_z)
-        normalized_x = vision.x / max(1.0, float(vision.frame_width))
-        normalized_y = vision.y / max(1.0, float(vision.frame_height))
-        radius = float(self.config["calibration"]["target_region_radius_norm"])
-        if math.hypot(normalized_x - target[0], normalized_y - target[1]) > radius:
-            raise ValueError("Molde fora da região útil sugerida para este ponto")
-        z_tolerance = float(self.config["calibration"]["plan_z_tolerance_mm"])
-        if abs(robot.z - plan_z) > z_tolerance:
-            raise ValueError(
-                f"Pose fora do plano: Z={robot.z:.2f} mm; esperado {plan_z:.2f} ± {z_tolerance:.2f} mm"
-            )
-        point_index, region, role, _target = self._next_point(session_id, plan_z)
+            raise ValueError("Visão indisponível. Congele a imagem com o molde visível antes de aproximar o robô.")
+        if robot is None:
+            raise ValueError("Pose do robô indisponível")
+        context = self._recording_context(session_id, plan_z, vision, robot)
         candidate = CaptureCandidate(
             id=str(uuid.uuid4()),
             session_id=session_id,
             plan_z=plan_z,
-            point_index=point_index,
-            role=role,
-            region=region,
+            point_index=context["point_index"],
+            role=context["role"],
+            region=context["region"],
             vision=vision,
             robot=robot,
             created_at=utc_now(),
+            warnings=tuple(context["warnings"]),
         )
         with self._lock:
             self._candidate = candidate
         self.storage.audit(
             session_id,
             "capture_frozen",
-            {"candidate_id": candidate.id, "plan_z": plan_z, "point": point_index},
+            {"candidate_id": candidate.id, "plan_z": plan_z, "point": candidate.point_index},
         )
         return candidate
 
@@ -282,6 +404,7 @@ class CaptureController:
             )
             return {"saved": False, "candidate_id": candidate.id}
         saved = self.storage.save_candidate(candidate)
+        self.release_vision()
         evaluation = self.evaluate(candidate.session_id, candidate.plan_z, persist_results=True)
         self._maybe_expand(candidate.session_id, candidate.plan_z, evaluation)
         return {"saved": True, "pair": saved, "evaluation": evaluation}
@@ -367,11 +490,19 @@ class CaptureController:
         for plan_z in session["config"]["planes_mm"]:
             plan_pairs = [pair for pair in pairs if float(pair["plan_z"]) == float(plan_z)]
             target = int(session["config"].get("plan_targets", {}).get(str(float(plan_z)), 7))
-            next_point = len(plan_pairs) + 1
+            next_point = self._open_point_index(session_id, float(plan_z))
             suggestion = None
-            if next_point <= min(target, len(POINT_REGIONS)):
+            if next_point is not None and next_point <= min(target, len(POINT_REGIONS)):
                 region, role, normalized = POINT_REGIONS[next_point - 1]
                 suggestion = {"index": next_point, "region": region, "role": role, "normalized": normalized}
+            elif next_point is None and plan_pairs:
+                extra = max(int(pair["point_index"]) for pair in plan_pairs) + 1
+                suggestion = {
+                    "index": extra,
+                    "region": "Extra",
+                    "role": "adjustment",
+                    "normalized": (0.50, 0.50),
+                }
             plans.append(
                 {
                     "z": float(plan_z),

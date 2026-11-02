@@ -3,19 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#081018">
+  <meta name="theme-color" content="#000000">
   <title>SINCRO_ROBO</title>
-  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/styles.css?v=10">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true">
-        <span></span><span></span><span></span>
-      </div>
+      <img class="brand-logo" src="/assets/logo-rtc.png" alt="RTC">
       <div>
+        <p>Integração Industrial</p>
         <h1>SINCRO<span>_ROBO</span></h1>
-        <p>Sincronismo visão ↔ robô</p>
       </div>
     </div>
     <div class="topbar-center" id="clock">--:--:--</div>
@@ -33,15 +31,23 @@
     <span class="version" id="version-label">v--</span>
   </div>
 
+  <div class="shell">
   <section class="panel campaign-panel" id="campaign-panel">
     <div class="panel-heading compact">
       <div>
         <span class="eyebrow">Guia OpenCV · uma etapa por vez</span>
         <h2>Calibração completa</h2>
       </div>
-      <button class="button button-primary" id="new-campaign" type="button">Iniciar campanha</button>
+      <div class="campaign-toolbar">
+        <select id="campaign-select" aria-label="Selecionar campanha">
+          <option value="">Selecionar campanha…</option>
+        </select>
+        <button class="button button-secondary" id="open-campaign" type="button">Abrir</button>
+        <button class="button button-danger" id="delete-campaign" type="button">Excluir</button>
+        <button class="button button-primary" id="new-campaign" type="button">Iniciar campanha</button>
+      </div>
     </div>
-    <p class="campaign-lead">O tabuleiro cobre a câmera. O molde e o RF-DETR entram só na afim. Sem campanha, a coleta atual não muda.</p>
+    <p class="campaign-lead">O tabuleiro cobre a câmera. O molde e o RF-DETR entram só na afim. Escolha uma campanha gravada para continuar da etapa em que ela parou.</p>
     <div id="campaign-body"></div>
   </section>
 
@@ -76,8 +82,8 @@
           <img id="camera-frame" alt="Imagem da câmera com máscara, centroide e eixo principal">
           <div class="camera-empty" id="camera-empty">
             <div class="scan-icon"><span></span></div>
-            <strong>Aguardando primeiro frame</strong>
-            <small>A imagem aparecerá quando o serviço de câmera estiver pronto.</small>
+            <strong id="camera-empty-title">Aguardando primeiro frame</strong>
+            <small id="camera-empty-detail">A imagem aparecerá quando o serviço de câmera estiver pronto.</small>
           </div>
           <div class="frame-corners" aria-hidden="true"></div>
           <div class="frame-meta">
@@ -91,7 +97,6 @@
           <div class="reading angle"><span>Vetor · θ</span><strong id="vision-angle">—</strong><small>graus</small></div>
           <div class="reading major"><span>VCPn X</span><strong id="vision-vcpn-x">—</strong><small>px</small></div>
           <div class="reading major"><span>VCPn Y</span><strong id="vision-vcpn-y">—</strong><small>px</small></div>
-          <div class="reading major" id="vision-roi-quadrant-card" hidden><span>Q</span><strong id="vision-roi-quadrant">—</strong><small>ROI</small></div>
           <div class="quality-block">
             <div><span>Confiança</span><strong id="vision-confidence">—</strong></div>
             <div class="quality-track"><i id="confidence-bar"></i></div>
@@ -153,13 +158,21 @@
             <span data-gate="stable">Visão estável</span>
             <span data-gate="pose">Pose recente</span>
             <span data-gate="region">Região útil</span>
-            <span data-gate="plan_z">Plano Z correto</span>
+            <span data-gate="plan_z">Plano Z</span>
             <span data-gate="not_duplicate">Ponto novo</span>
           </div>
-          <button class="capture-button" id="capture-button" disabled>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>
-            <span><strong>CAPTURAR PONTO</strong><small>Congelar visão + pose</small></span>
-          </button>
+          <div class="capture-actions">
+            <button class="capture-button" id="freeze-button" type="button" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>
+              <span><strong>CONGELAR IMAGEM</strong><small>Molde visível, robô fora</small></span>
+            </button>
+            <button class="button button-secondary capture-release" id="release-button" type="button" hidden>Soltar imagem</button>
+            <button class="capture-button" id="capture-button" type="button" hidden disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></svg>
+              <span><strong>REGISTRAR PONTO</strong><small>Pose atual do robô</small></span>
+            </button>
+          </div>
+          <p class="capture-warning" id="capture-warning" hidden></p>
           <p class="capture-help" id="capture-help">Ative uma sessão e um plano para começar.</p>
         </article>
       </aside>
@@ -192,6 +205,24 @@
       </article>
     </section>
 
+    <section class="panel project-panel" id="project-panel">
+      <div class="panel-heading compact">
+        <div>
+          <span class="eyebrow">Lente, extrínseca e afim</span>
+          <h2>Câmera para robô</h2>
+        </div>
+      </div>
+      <form class="project-form" id="project-form">
+        <label>Campanha<select id="project-campaign" aria-label="Campanha da projeção"><option value="">Selecionar campanha…</option></select></label>
+        <label>Plano Z<select id="project-plane" aria-label="Plano Z da afim"><option value="">Escolha a campanha</option></select></label>
+        <label>X câmera<input id="project-x" type="number" step="0.01" inputmode="decimal" required></label>
+        <label>Y câmera<input id="project-y" type="number" step="0.01" inputmode="decimal" required></label>
+        <button class="button button-primary" type="submit">Calcular</button>
+      </form>
+      <p class="project-note">X e Y do robô são o centro geométrico: a afim do pixel já corrigido pela lente. A extrínseca informa onde o mesmo pixel cai no plano Z.</p>
+      <div class="project-result" id="project-result" hidden></div>
+    </section>
+
     <section class="panel history-panel">
       <div class="panel-heading compact">
         <div><span class="eyebrow">Trilha auditável</span><h2>Pontos confirmados</h2></div>
@@ -199,18 +230,20 @@
       </div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>#</th><th>Plano</th><th>Tipo</th><th>Visão (px)</th><th>θv</th><th>Robô XYZ (mm)</th><th>Rz</th><th>Residual XY</th><th>Status</th></tr></thead>
-          <tbody id="pairs-table"><tr><td colspan="9" class="empty-table">Nenhum ponto gravado nesta sessão.</td></tr></tbody>
+          <thead><tr><th>#</th><th>Plano</th><th>Tipo</th><th>Visão (px)</th><th>θv</th><th>Robô XYZ (mm)</th><th>Rz</th><th>Residual XY</th><th>Status</th><th></th></tr></thead>
+          <tbody id="pairs-table"><tr><td colspan="10" class="empty-table">Nenhum ponto gravado nesta sessão.</td></tr></tbody>
         </table>
       </div>
     </section>
   </main>
+  </div>
 
   <dialog id="campaign-dialog" class="modal">
     <form method="dialog" id="campaign-form">
       <div class="modal-heading"><div><span class="eyebrow">Tabuleiro medido</span><h2>Nova campanha</h2></div><button value="cancel" class="close-button" aria-label="Fechar">×</button></div>
       <label>Nome<input id="campaign-name" maxlength="120" placeholder="Ex.: Curitiba · câmera fixa" required></label>
-      <label>Lado do quadrado, em milímetros<input id="campaign-square" type="number" min="0.1" step="0.01" value="30" required><small>Meça com paquímetro. 10×7 quadrados dão 9×6 cantos internos.</small></label>
+      <label>Lado do quadrado, em milímetros<input id="campaign-square" type="number" min="0.1" step="0.01" value="30" required><small>Meça com paquímetro.</small></label>
+      <label>Cantos internos (colunas × linhas)<span class="pattern-inputs"><input id="campaign-cols" type="number" min="3" step="1" value="9" required> × <input id="campaign-rows" type="number" min="3" step="1" value="6" required></span><small>Conte cruzamentos, não quadrados: 8×8 quadrados dão 7×7 cantos; 10×7 dão 9×6.</small></label>
       <div class="modal-actions"><button value="cancel" class="button button-secondary">Cancelar</button><button type="submit" value="default" class="button button-primary">Começar pela etapa 1</button></div>
     </form>
   </dialog>
@@ -233,13 +266,14 @@
     <div class="confirmation-icon"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v5c0 5 3.4 8.4 8 9 4.6-.6 8-4 8-9V7l-8-4Z"/><path d="m9 12 2 2 4-5"/></svg></div>
     <span class="eyebrow">Candidato congelado</span>
     <h2>Gravar esta posição do robô?</h2>
-    <p>Os valores abaixo estão congelados. Somente <strong>GRAVAR</strong> persiste o par Visão ↔ Robô.</p>
+    <p>A visão ficou na imagem congelada. A pose é a do robô neste momento. Avisos não impedem a gravação. Somente <strong>GRAVAR</strong> persiste o par.</p>
+    <p class="candidate-warning" id="candidate-warnings" hidden></p>
     <div class="candidate-grid" id="candidate-values"></div>
     <div class="modal-actions"><button class="button button-secondary" id="cancel-candidate">CANCELAR</button><button class="button button-confirm" id="confirm-candidate">GRAVAR</button></div>
   </dialog>
 
   <div class="toast-region" id="toast-region" aria-live="polite"></div>
-  <script src="/assets/app.js" defer></script>
-  <script src="/assets/campaign.js" defer></script>
+  <script src="/assets/app.js?v=10" defer></script>
+  <script src="/assets/campaign.js?v=14" defer></script>
 </body>
 </html>

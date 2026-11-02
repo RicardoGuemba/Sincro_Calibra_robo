@@ -9,6 +9,7 @@ User=sincro-robo
 Group=sincro-robo
 WorkingDirectory=/opt/sincro_robo
 EnvironmentFile=/etc/sincro-robo.env
+ExecStartPre=+/opt/sincro_robo/scripts/fix_gige_network.sh
 ExecStart=/opt/sincro_robo/scripts/run_pcbox.sh
 Restart=on-failure
 RestartSec=5

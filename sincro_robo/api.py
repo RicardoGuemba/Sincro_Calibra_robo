@@ -26,6 +26,7 @@ class Decision(BaseModel):
 class CampaignCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     square_size_mm: float = Field(gt=0)
+    pattern: list[int] | None = Field(default=None, min_length=2, max_length=2)
 
 
 class CampaignChecks(BaseModel):
@@ -46,6 +47,16 @@ class DirectionConfirm(BaseModel):
 
 class PlaneSelect(BaseModel):
     plan_z: float
+
+
+class AffineChoice(BaseModel):
+    session_id: str
+
+
+class PixelProjection(BaseModel):
+    x_camera: float
+    y_camera: float
+    plan_z: float | None = None
 
 
 def _campaign(view: dict[str, Any] | None) -> dict[str, Any]:
@@ -123,6 +134,7 @@ def create_app(config: dict[str, Any]) -> FastAPI:
             "xy_tolerance_mm": config["calibration"]["xy_tolerance_mm"],
             "angular_tolerance_deg": config["calibration"]["angular_tolerance_deg"],
             "pick_offset_local_mm": config["calibration"]["pick_offset_local_mm"],
+            "board_inner_corners": config["calibration"]["board_inner_corners"],
             "model_threshold": config["model"]["threshold"],
             "mode": {
                 "camera": config["camera"]["provider"],
@@ -162,6 +174,24 @@ def create_app(config: dict[str, Any]) -> FastAPI:
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Sessão não encontrada") from error
 
+    @app.post("/api/sessions/{session_id}/pairs/{pair_id}/remove")
+    def remove_pair(session_id: str, pair_id: str) -> dict[str, Any]:
+        try:
+            return runtime.controller.remove_point(session_id, pair_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Ponto não encontrado") from error
+
+    @app.post("/api/capture/freeze")
+    def capture_freeze() -> dict[str, Any]:
+        with runtime.state._lock:
+            jpeg = runtime.state.frame_jpeg
+        return runtime.controller.freeze_vision(jpeg)
+
+    @app.post("/api/capture/release")
+    def capture_release() -> dict[str, Any]:
+        runtime.controller.release_vision()
+        return {"frozen": False}
+
     @app.post("/api/capture")
     def capture() -> dict[str, Any]:
         return runtime.controller.capture().to_dict()
@@ -170,11 +200,46 @@ def create_app(config: dict[str, Any]) -> FastAPI:
     def candidate_decision(request: Decision) -> dict[str, Any]:
         return runtime.controller.decide(request.confirm)
 
+    @app.get("/api/campaigns")
+    def campaigns() -> list[dict[str, Any]]:
+        return runtime.campaign.summaries()
+
     @app.post("/api/campaigns", status_code=201)
     def create_campaign(request: CampaignCreate) -> dict[str, Any]:
-        view = runtime.campaign.create(request.name, request.square_size_mm)
+        view = runtime.campaign.create(request.name, request.square_size_mm, request.pattern)
         assert view is not None
         return view
+
+    @app.get("/api/campaigns/{campaign_id}/projection")
+    def campaign_projection(campaign_id: str) -> dict[str, Any]:
+        try:
+            return runtime.campaign.projection_catalog(campaign_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Campanha não encontrada") from error
+
+    @app.post("/api/campaigns/{campaign_id}/projection")
+    def campaign_project_pixel(campaign_id: str, request: PixelProjection) -> dict[str, Any]:
+        try:
+            return runtime.campaign.project_pixel(
+                campaign_id, request.x_camera, request.y_camera, request.plan_z
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Campanha não encontrada") from error
+
+    @app.post("/api/campaigns/{campaign_id}/open")
+    def open_campaign(campaign_id: str) -> dict[str, Any]:
+        try:
+            return runtime.campaign.resume(campaign_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Campanha não encontrada") from error
+
+    @app.delete("/api/campaigns/{campaign_id}")
+    def delete_campaign(campaign_id: str) -> dict[str, Any]:
+        try:
+            runtime.campaign.delete(campaign_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Campanha não encontrada") from error
+        return {"id": campaign_id, "deleted": True}
 
     @app.post("/api/campaigns/active/checks")
     def campaign_checks(request: CampaignChecks) -> dict[str, Any]:
@@ -183,6 +248,10 @@ def create_app(config: dict[str, Any]) -> FastAPI:
     @app.post("/api/campaigns/active/advance")
     def campaign_advance() -> dict[str, Any]:
         return _campaign(runtime.campaign.advance())
+
+    @app.post("/api/campaigns/active/retreat")
+    def campaign_retreat() -> dict[str, Any]:
+        return _campaign(runtime.campaign.retreat())
 
     @app.post("/api/campaigns/active/restart")
     def campaign_restart() -> dict[str, Any]:
@@ -208,6 +277,14 @@ def create_app(config: dict[str, Any]) -> FastAPI:
     def campaign_undistort() -> dict[str, Any]:
         return _campaign(runtime.campaign.confirm_undistort())
 
+    @app.post("/api/campaigns/active/preview/freeze")
+    def campaign_freeze() -> dict[str, Any]:
+        return _campaign(runtime.campaign.freeze_preview())
+
+    @app.post("/api/campaigns/active/preview/release")
+    def campaign_release() -> dict[str, Any]:
+        return _campaign(runtime.campaign.release_preview())
+
     @app.post("/api/campaigns/active/frame/{role}")
     def campaign_frame(role: str) -> dict[str, Any]:
         return _campaign(runtime.campaign.record_frame_point(role))
@@ -232,9 +309,20 @@ def create_app(config: dict[str, Any]) -> FastAPI:
     def campaign_affine() -> dict[str, Any]:
         return _campaign(runtime.campaign.open_affine_session())
 
+    @app.post("/api/campaigns/active/affine/use")
+    def campaign_affine_use(request: AffineChoice) -> dict[str, Any]:
+        try:
+            return _campaign(runtime.campaign.use_affine_session(request.session_id))
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Sessão não encontrada") from error
+
     @app.post("/api/campaigns/active/ransac")
     def campaign_ransac() -> dict[str, Any]:
         return _campaign(runtime.campaign.apply_ransac())
+
+    @app.post("/api/campaigns/active/finish")
+    def campaign_finish() -> dict[str, Any]:
+        return runtime.campaign.finish()
 
     @app.post("/api/sessions/{session_id}/export")
     def export(session_id: str) -> dict[str, Any]:

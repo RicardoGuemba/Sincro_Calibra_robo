@@ -51,9 +51,6 @@ function renderVision(vision) {
   dom("vision-y").textContent = hasVision ? fmt(vision.y, 1) : "—";
   dom("vision-vcpn-x").textContent = hasVision ? fmt(vision.vcpn_x, 1) : "—";
   dom("vision-vcpn-y").textContent = hasVision ? fmt(vision.vcpn_y, 1) : "—";
-  const roiQuadrant = hasVision && vision.roi_quadrant ? vision.roi_quadrant : null;
-  dom("vision-roi-quadrant-card").hidden = !roiQuadrant;
-  dom("vision-roi-quadrant").textContent = roiQuadrant || "—";
   dom("vision-angle").textContent = hasVision ? fmt(vision.angle_deg, 1) : "—";
   dom("vision-confidence").textContent = hasVision ? `${fmt(vision.confidence * 100, 1)}%` : "—";
   dom("axis-quality").textContent = hasVision ? fmt(vision.axis_quality, 2) : "—";
@@ -74,19 +71,56 @@ function renderRobot(robot) {
 
 function renderGates(state) {
   const gates = state.capture_readiness || {};
+  const active = Boolean(gates.session && gates.plan);
+  const measured = {
+    single_instance: gates.vision_present,
+    confidence: gates.vision_present,
+    mask_not_cut: gates.vision_present,
+    axis_quality: gates.vision_present,
+    vcp_scale: gates.vision_present,
+    stable: gates.vision_present,
+    region: gates.vision_present,
+    not_duplicate: gates.vision_present,
+    pose: gates.pose_present,
+    plan_z: Boolean(gates.plan_z || gates.plan_z_warning),
+  };
   document.querySelectorAll("#gate-list [data-gate]").forEach((node) => {
-    node.classList.toggle("ok", Boolean(gates[node.dataset.gate]));
+    const key = node.dataset.gate;
+    const ok = Boolean(gates[key]);
+    const applicable = Boolean(measured[key]);
+    node.classList.toggle("ok", applicable && ok);
+    node.classList.toggle("warn", active && applicable && !ok);
+    node.title = "";
   });
-  const allOk = ["single_instance", "confidence", "mask_not_cut", "axis_quality", "vcp_scale", "stable", "pose", "region", "plan_z", "not_duplicate"].every((key) => gates[key]);
-  const ready = Boolean(gates.ready);
-  dom("capture-button").disabled = !ready || app.busy;
+  const frozen = Boolean(gates.vision_frozen);
+  const advice = Array.isArray(gates.advice) ? gates.advice : [];
+  const freezeButton = dom("freeze-button");
+  const releaseButton = dom("release-button");
+  const captureButton = dom("capture-button");
+  freezeButton.hidden = frozen;
+  freezeButton.disabled = !gates.can_freeze || app.busy;
+  releaseButton.hidden = !frozen;
+  releaseButton.disabled = app.busy;
+  captureButton.hidden = !frozen;
+  captureButton.disabled = !gates.can_register || app.busy;
+  const warning = dom("capture-warning");
+  warning.hidden = !advice.length;
+  warning.textContent = advice.length ? `${advice.join(" ")} Isso não impede gravar o ponto.` : "";
   dom("capture-help").textContent = !state.active_session_id
     ? "Ative uma sessão e um plano para começar."
     : state.active_plan_z === null
       ? "Selecione o plano Z em que a coleta será feita."
-      : !allOk
-        ? "A captura será liberada quando todos os gates estiverem verdes."
-        : "Pronto para congelar visão e pose do robô.";
+      : frozen
+        ? gates.pose_present
+          ? advice.length
+            ? "Imagem congelada. Os avisos são orientação. Grave se a posição estiver certa."
+            : "Imagem congelada. Encoste o robô no molde e registre a pose."
+          : "Imagem congelada. Ainda não há pose do robô para gravar."
+        : gates.can_freeze
+          ? advice.length
+            ? "Há desvios em relação ao recomendado. Você pode congelar mesmo assim. A decisão de gravar é sua."
+            : "Congele a imagem com o molde visível. O robô entra depois, para não cobrir o molde."
+          : "Ainda não há molde na imagem para congelar.";
 }
 
 function renderPlans(session) {
@@ -121,7 +155,13 @@ function renderCaptureTarget(session) {
   dom("current-plane").textContent = plan ? `Z ${fmt(plan.z, 0)} mm` : "Z —";
   dom("next-point").textContent = plan?.suggestion ? `Ponto ${String(plan.suggestion.index).padStart(2, "0")} / ${plan.target}` : plan?.complete ? "Plano concluído" : "Selecione um plano";
   dom("region-name").textContent = plan?.suggestion?.region || "—";
-  dom("point-role").textContent = plan?.suggestion ? (plan.suggestion.role === "validation" ? "ponto de validação" : "ponto de ajuste") : "—";
+  dom("point-role").textContent = plan?.suggestion
+    ? plan.suggestion.region === "Extra"
+      ? "ponto extra, a seu critério"
+      : plan.suggestion.role === "validation"
+        ? "ponto de validação"
+        : "ponto de ajuste"
+    : "—";
   const [x, y] = plan?.suggestion?.normalized || [0.5, 0.5];
   dom("target-dot").style.left = `${x * 100}%`;
   dom("target-dot").style.top = `${y * 100}%`;
@@ -147,7 +187,23 @@ function renderPairs(session) {
     <td>${fmt(pair.robot.x, 1)} · ${fmt(pair.robot.y, 1)} · ${fmt(pair.robot.z, 1)}</td><td>${fmt(pair.robot.rz, 1)}°</td>
     <td>${pair.residual_xy === null ? "—" : `${fmt(pair.residual_xy)} mm`}</td>
     <td><span class="tag ${pair.status === "suspect" ? "suspect" : ""}">${pair.status === "suspect" ? "suspeito" : "aceito"}</span></td>
-  </tr>`).join("") : '<tr><td colspan="9" class="empty-table">Nenhum ponto gravado nesta sessão.</td></tr>';
+    <td><button type="button" class="button button-secondary button-tiny" data-remove-pair="${pair.id}" data-point-label="ponto ${String(pair.point_index).padStart(2, "0")} em Z ${fmt(pair.plan_z, 0)}">Refazer</button></td>
+  </tr>`).join("") : '<tr><td colspan="10" class="empty-table">Nenhum ponto gravado nesta sessão.</td></tr>';
+  if (!session) return;
+  dom("pairs-table").querySelectorAll("[data-remove-pair]").forEach((button) => {
+    button.addEventListener("click", () => redoPoint(session.id, button.dataset.removePair, button.dataset.pointLabel));
+  });
+}
+
+async function redoPoint(sessionId, pairId, label) {
+  if (!window.confirm(`Refazer ${label}? Esse ponto sai e a próxima captura volta para essa posição.`)) return;
+  try {
+    await api(`/api/sessions/${sessionId}/pairs/${pairId}/remove`, { method: "POST" });
+    await refreshState();
+    toast("Ponto liberado. Capture de novo nessa posição.");
+  } catch (error) {
+    toast(error.message, "error");
+  }
 }
 
 function renderSession(session) {
@@ -168,17 +224,32 @@ function renderCandidate(candidate) {
   }
   const v = candidate.vision;
   const r = candidate.robot;
+  const warnings = candidate.warnings || [];
+  const warning = dom("candidate-warnings");
+  warning.hidden = !warnings.length;
+  warning.textContent = warnings.length
+    ? `${warnings.join(" ")} A decisão de gravar é sua.`
+    : "";
   dom("candidate-values").innerHTML = `
     <div><span>Ponto / plano</span><strong>${String(candidate.point_index).padStart(2, "0")} · Z=${fmt(candidate.plan_z, 0)} mm</strong></div>
     <div><span>Região</span><strong>${candidate.region}</strong></div>
     <div><span>Visão</span><strong>Xv ${fmt(v.x, 1)} · Yv ${fmt(v.y, 1)} · θ ${fmt(v.angle_deg, 1)}°</strong></div>
-    <div><span>VCPn</span><strong>${fmt(v.vcpn_x, 1)} · ${fmt(v.vcpn_y, 1)} px${v.roi_quadrant ? ` · Q ${v.roi_quadrant}` : ""}</strong></div>
+    <div><span>VCPn</span><strong>${fmt(v.vcpn_x, 1)} · ${fmt(v.vcpn_y, 1)} px</strong></div>
     <div><span>Robô</span><strong>X ${fmt(r.x, 1)} · Y ${fmt(r.y, 1)} · Z ${fmt(r.z, 1)} · Rz ${fmt(r.rz, 1)}°</strong></div>`;
   if (!dialog.open) dialog.showModal();
 }
 
+function renderCameraPlaceholder(camera) {
+  const failing = camera?.status === "error";
+  dom("camera-empty-title").textContent = failing ? "Câmera sem imagem" : "Aguardando primeiro frame";
+  dom("camera-empty-detail").textContent = failing && camera.error
+    ? camera.error
+    : "A imagem aparecerá quando o serviço de câmera estiver pronto.";
+}
+
 function render(state) {
   setService("status-camera", state.hardware.camera);
+  renderCameraPlaceholder(state.hardware.camera);
   setService("status-model", state.hardware.model);
   setService("status-plc", state.hardware.plc);
   renderVision(state.vision);
@@ -186,14 +257,21 @@ function render(state) {
   renderGates(state);
   renderSession(state.session);
   renderCandidate(state.candidate);
+  paintProjectCampaigns(state.campaigns);
 }
 
+let stateEpoch = 0;
+
 async function refreshState() {
+  const epoch = ++stateEpoch;
   try {
-    app.state = await api("/api/state");
+    const state = await api("/api/state");
+    if (epoch !== stateEpoch) return;
+    app.state = state;
     render(app.state);
     if (window.renderCampaign) window.renderCampaign(app.state.campaign);
   } catch (error) {
+    if (epoch !== stateEpoch) return;
     setService("status-camera", { status: "error", error: error.message });
   }
 }
@@ -215,6 +293,33 @@ async function activatePlan(plan) {
   } catch (error) { toast(error.message, "error"); }
 }
 
+async function freezeVision() {
+  if (app.busy) return;
+  app.busy = true;
+  dom("freeze-button").disabled = true;
+  try {
+    await api("/api/capture/freeze", { method: "POST" });
+    toast("Imagem congelada. Posicione o robô e registre o ponto.");
+  } catch (error) { toast(error.message, "error"); }
+  finally {
+    app.busy = false;
+    await refreshState();
+  }
+}
+
+async function releaseVision() {
+  if (app.busy) return;
+  app.busy = true;
+  try {
+    await api("/api/capture/release", { method: "POST" });
+    toast("Imagem ao vivo de novo.");
+  } catch (error) { toast(error.message, "error"); }
+  finally {
+    app.busy = false;
+    await refreshState();
+  }
+}
+
 async function capture() {
   if (app.busy) return;
   app.busy = true;
@@ -227,9 +332,14 @@ async function capture() {
 }
 
 async function decide(confirm) {
+  const warned = Boolean(app.state?.candidate?.warnings?.length);
   try {
     const result = await api("/api/candidate/decision", { method: "POST", body: JSON.stringify({ confirm }) });
-    toast(confirm && result.saved ? "Ponto gravado e validação atualizada." : "Candidato descartado; nenhum dado foi persistido.");
+    toast(
+      confirm && result.saved
+        ? (warned ? "Ponto gravado. O Z diferente do plano ficou só como aviso." : "Ponto gravado e validação atualizada.")
+        : "Candidato descartado. A imagem congelada continua disponível.",
+    );
     await refreshState();
     await refreshSessions();
   } catch (error) { toast(error.message, "error"); }
@@ -257,6 +367,10 @@ dom("camera-frame").addEventListener("load", () => {
   dom("camera-frame").classList.add("visible");
   dom("camera-empty").classList.add("hidden");
 });
+dom("camera-frame").addEventListener("error", () => {
+  dom("camera-frame").classList.remove("visible");
+  dom("camera-empty").classList.remove("hidden");
+});
 dom("new-session").addEventListener("click", () => dom("session-dialog").showModal());
 dom("activate-session").addEventListener("click", async () => {
   const id = dom("session-select").value;
@@ -279,9 +393,123 @@ dom("session-form").addEventListener("submit", async (event) => {
     toast("Sessão criada. Selecione o primeiro plano Z.");
   } catch (error) { toast(error.message, "error"); }
 });
+dom("freeze-button").addEventListener("click", freezeVision);
+dom("release-button").addEventListener("click", releaseVision);
 dom("capture-button").addEventListener("click", capture);
 dom("cancel-candidate").addEventListener("click", () => decide(false));
 dom("confirm-candidate").addEventListener("click", () => decide(true));
+let projectCatalog = null;
+
+function paintProjectCampaigns(campaigns) {
+  const select = dom("project-campaign");
+  if (!select) return;
+  const items = Array.isArray(campaigns) ? campaigns : [];
+  const signature = items.map((item) => `${item.id}:${item.status}:${item.name}`).join("|");
+  if (select.dataset.signature === signature) return;
+  const previous = select.value;
+  select.replaceChildren(new Option("Selecionar campanha…", ""));
+  items.forEach((item) => {
+    const closed = item.status === "closed" ? " · fechada" : "";
+    select.appendChild(new Option(`${item.name}${closed}`, item.id));
+  });
+  select.dataset.signature = signature;
+  select.value = items.some((item) => item.id === previous) ? previous : "";
+  if (select.value !== previous) loadProjectionPlanes();
+}
+
+function projectionPlane() {
+  return (projectCatalog?.planes || []).find((plane) => String(plane.z) === dom("project-plane").value);
+}
+
+function paintProjectionFormula() {
+  const result = dom("project-result");
+  const plane = projectionPlane();
+  if (!result || !plane?.relation) return;
+  result.hidden = false;
+  result.replaceChildren();
+  const formula = document.createElement("p");
+  formula.className = "project-formula";
+  formula.textContent = `u, v = correção da lente\nX_robo = ${plane.relation.x_robo}\nY_robo = ${plane.relation.y_robo}`;
+  result.appendChild(formula);
+}
+
+async function loadProjectionPlanes() {
+  const campaignId = dom("project-campaign").value;
+  const planeSelect = dom("project-plane");
+  const result = dom("project-result");
+  projectCatalog = null;
+  planeSelect.replaceChildren();
+  if (result) {
+    result.hidden = true;
+    result.replaceChildren();
+  }
+  if (!campaignId) {
+    planeSelect.appendChild(new Option("Escolha a campanha", ""));
+    return;
+  }
+  try {
+    projectCatalog = await api(`/api/campaigns/${campaignId}/projection`);
+    const ready = projectCatalog.planes.filter((plane) => plane.ready);
+    if (!ready.length) {
+      planeSelect.appendChild(new Option("Sem afim pronta", ""));
+      toast("Esta campanha ainda não tem afim no pixel corrigido.", "error");
+      return;
+    }
+    ready.forEach((plane) => planeSelect.appendChild(new Option(`Z ${plane.z} mm`, String(plane.z))));
+    paintProjectionFormula();
+  } catch (error) {
+    planeSelect.appendChild(new Option("Indisponível", ""));
+    toast(error.message, "error");
+  }
+}
+
+async function projectPixel(event) {
+  event.preventDefault();
+  const campaignId = dom("project-campaign").value;
+  const planZ = dom("project-plane").value;
+  if (!campaignId || planZ === "") {
+    toast("Escolha a campanha e o plano Z.", "error");
+    return;
+  }
+  try {
+    const projected = await api(`/api/campaigns/${campaignId}/projection`, {
+      method: "POST",
+      body: JSON.stringify({
+        x_camera: Number(dom("project-x").value),
+        y_camera: Number(dom("project-y").value),
+        plan_z: Number(planZ),
+      }),
+    });
+    const result = dom("project-result");
+    result.hidden = false;
+    result.replaceChildren();
+    const answer = document.createElement("div");
+    answer.className = "project-answer";
+    [["X robô", projected.x_robo], ["Y robô", projected.y_robo]].forEach(([label, value]) => {
+      const card = document.createElement("div");
+      const caption = document.createElement("span");
+      caption.textContent = label;
+      const strong = document.createElement("strong");
+      strong.textContent = `${fmt(value, 2)} mm`;
+      card.append(caption, strong);
+      answer.appendChild(card);
+    });
+    const formula = document.createElement("p");
+    formula.className = "project-formula";
+    formula.textContent = `u = ${fmt(projected.u_rectified_px, 2)} px · v = ${fmt(projected.v_rectified_px, 2)} px\nX_robo = ${projected.relation.x_robo}\nY_robo = ${projected.relation.y_robo}`;
+    const optical = document.createElement("div");
+    optical.className = "project-side";
+    const opticalLabel = document.createElement("span");
+    opticalLabel.textContent = "Extrínseca no plano";
+    optical.append(opticalLabel, document.createTextNode(` X ${fmt(projected.optical_x_mm, 2)} mm · Y ${fmt(projected.optical_y_mm, 2)} mm · Z ${fmt(projected.plane_z_mm, 0)} mm`));
+    result.append(answer, formula, optical);
+  } catch (error) { toast(error.message, "error"); }
+}
+
+dom("project-campaign").addEventListener("change", loadProjectionPlanes);
+dom("project-plane").addEventListener("change", paintProjectionFormula);
+dom("project-form").addEventListener("submit", projectPixel);
+
 dom("export-button").addEventListener("click", async () => {
   if (!app.state?.active_session_id) return;
   try {

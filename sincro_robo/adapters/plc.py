@@ -15,7 +15,7 @@ class SyntheticPoseReader:
         self,
         vision_supplier: Callable[[], VisionObservation | None],
         plan_supplier: Callable[[], float | None],
-        pick_offset_mm: tuple[float, float] = (55.0, 0.0),
+        pick_offset_mm: tuple[float, float] = (0.0, 55.0),
         override_supplier: Callable[[], tuple[float, float, float] | None] | None = None,
     ) -> None:
         self.vision_supplier = vision_supplier

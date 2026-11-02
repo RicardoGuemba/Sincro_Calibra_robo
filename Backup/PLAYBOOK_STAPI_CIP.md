@@ -180,7 +180,7 @@ Fallback se o filtro for desconhecido: `cv2.COLOR_BayerGRBG2BGR`.
 
 Mono → `cv2.COLOR_GRAY2BGR`. Bits > 8: `uint16` escalado para `uint8` com `each_component_valid_bit_count` quando `get_pixel_format_info` existir.
 
-Resize é política **desta HMI** (teto típico 960 px, segurança 1920). A ferramenta nova **não precisa** redimensionar para obter um frame válido.
+A saída BGR do Sincro usa o mesmo teto do v2108: lado maior em **960** px (`camera.max_dimension`), `cv2.INTER_AREA`, proporção preservada. Limite 0 cai no teto de segurança de **1920** px. O ROI de produção foi medido nesse raster.
 
 ### 3.7 Nós GenICam (opcional)
 

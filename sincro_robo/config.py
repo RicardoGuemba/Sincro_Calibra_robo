@@ -21,8 +21,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "camera": {
         "provider": "synthetic",
         "device_index": 0,
+        "interface": "",
         "fetch_timeout_ms": 400,
+        "reconnect_after_failures": 5,
         "target_fps": 8.0,
+        "max_dimension": 960,
         "width": 960,
         "height": 540,
     },
@@ -49,8 +52,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "vision_reference": {
         "vcp_offset_mm": 55.0,
         "mm_per_px": 1.0,
-        "roi_enabled": True,
-        "roi_px": [189, 103, 277, 277],
+        "roi_enabled": False,
     },
     "vision_quality": {
         "min_confidence": 0.3,
@@ -69,13 +71,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_points_per_plane": 9,
         "adjustment_points_per_plane": 5,
         "validation_points_per_plane": 2,
-        "pick_offset_local_mm": [55.0, 0.0],
+        "pick_offset_local_mm": [0.0, 55.0],
         "xy_tolerance_mm": 20.0,
         "angular_tolerance_deg": 5.0,
         "duplicate_distance_px": 12.0,
         "duplicate_angle_deg": 3.0,
         "plan_z_tolerance_mm": 20.0,
         "target_region_radius_norm": 0.24,
+        "board_inner_corners": [9, 6],
     },
 }
 
