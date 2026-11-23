@@ -1,8 +1,12 @@
-# SINCRO_ROBO
+# Calibração entre câmera e coordenadas do robô
 
 Aplicação web local para calibração manual do relacionamento entre a câmera Omron Sentech, a segmentação RF-DETR e a pose de um robô lida no Omron NX102 via CIP.
 
 A implementação segue o **PRD + SDD v0.4** e o `Backup/PLAYBOOK_STAPI_CIP.md`. Ela não comanda movimentos, não executa handshake, não verifica permissivos de segurança e não escreve no CLP.
+
+**Arquivos de referência**
+
+- [DEPLOY_PCBOX.md](DEPLOY_PCBOX.md)
 
 ## O que está implementado
 
